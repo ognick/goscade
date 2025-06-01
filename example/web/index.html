@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Goscade Graph</title>
+    <script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
+    <script src="https://unpkg.com/cytoscape/dist/cytoscape.min.js"></script>
+    <script src="https://unpkg.com/cytoscape-dagre/cytoscape-dagre.js"></script>
+    <style>
+        body {
+            margin: 0;
+            background: #f8f9fa;
+            color: #333;
+            font-family: 'Courier New', monospace;
+        }
+        #toolbar {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 20;
+        }
+        #toolbar button {
+            background: #222;
+            color: #f4f4f4;
+            border: 1px solid #aaa;
+            padding: 6px 12px;
+            margin-right: 8px;
+            cursor: pointer;
+        }
+        #statusline {
+            position: absolute;
+            top: 50px;
+            left: 10px;
+            background: #fff;
+            border: 1px solid #aaa;
+            padding: 8px;
+            font-size: 12px;
+            z-index: 20;
+        }
+        #status-state.ready { color: #4CAF50; }
+        #status-state.running { color: #2196F3; }
+        #status-state.stopped { color: #000; }
+        #status-state.error { color: #F44336; }
+        #status-state.stopping { color: #FF9800; }
+        #cy {
+            width: 100vw;
+            height: 100vh;
+            display: block;
+        }
+        #menu {
+            position: absolute;
+            display: none;
+            background: #fff;
+            color: #000;
+            border: 1px solid #aaa;
+            padding: 10px;
+            z-index: 10;
+            width: 220px;
+        }
+        #menu input, #menu button {
+            margin: 5px 0;
+            width: 100%;
+            background: #eaeaea;
+            color: #000;
+            border: 1px solid #ccc;
+            padding: 5px;
+        }
+        #legend {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            background: #fff;
+            color: #000;
+            border: 1px solid #aaa;
+            padding: 10px;
+            font-size: 12px;
+            z-index: 10;
+        }
+    </style>
+</head>
+<body>
+<div id="toolbar">
+    <button id="start-btn" onclick="startSystem()">Start</button>
+    <button onclick="stopSystem()">Stop</button>
+</div>
+<div id="statusline">
+    <b>Status:</b> <span id="status-state"></span>
+</div>
+<div id="cy"></div>
+<div id="menu">
+    <div><b>Component ID:</b> <span id="menu-id"></span></div>
+    <label>Delay (s):</label>
+    <input id="input-delay" type="number" value="0" />
+    <label>Ready error (string or empty):</label>
+    <input id="input-error" type="text" />
+    <button onclick="sendUpdate()">Send Update</button>
+    <button onclick="sendKill()">Kill Component</button>
+</div>
+<div id="legend">
+    <div><b>Legend:</b></div>
+    <div style="color: #4CAF50">● Ready</div>
+    <div style="color: #2196F3">● Running</div>
+    <div style="color: #F44336">● Error</div>
+    <div style="color: #000">● Stopped</div>
+    <div style="color: #FF9800">● Stopping</div>
+</div>
+<script>
+    cytoscape.use(window.cytoscapeDagre);
+    let cy = null;
+    let selectedId = null;
+    let lastGraphKey = '';
+    let isIdle = true;
+
+    function getOrCreateGraphID() {
+        const url = new URL(window.location.href);
+        const id = url.searchParams.get("graph_id");
+        if (id) return id;
+        const newId = crypto.randomUUID();
+        url.searchParams.set("graph_id", newId);
+        window.location.href = url.toString();
+    }
+
+    const graphId = getOrCreateGraphID();
+
+    async function fetchGraph() {
+        const res = await fetch(`/graph?graph_id=${graphId}`);
+        return await res.json();
+    }
+
+    function buildElements(data) {
+        const elements = [];
+        const edges = new Set();
+        data.components?.sort((a, b) => a.id - b.id);
+        data.components?.forEach(comp => {
+            elements.push({
+                data: {
+                    id: String(comp.id),
+                    label: comp.name,
+                    delay: comp.delay || 0,
+                    error: comp.error || null
+                },
+                classes: comp.status || 'pending'
+            });
+            (comp.depends_on || []).forEach(dep => {
+                const edgeId = `${dep}->${comp.id}`;
+                if (!edges.has(edgeId)) {
+                    edges.add(edgeId);
+                    elements.push({
+                        data: {
+                            id: edgeId,
+                            source: String(dep),
+                            target: String(comp.id)
+                        }
+                    });
+                }
+            });
+        });
+        return elements;
+    }
+
+    async function renderGraph(force = false) {
+        const data = await fetchGraph();
+        const graphKey = JSON.stringify(data.components.map(d => [d.id, d.depends_on?.sort()]));
+        const zoom = cy?.zoom();
+        const pan = cy?.pan();
+        if (!cy || force || graphKey !== lastGraphKey) {
+            lastGraphKey = graphKey;
+            const elements = buildElements(data);
+            if (cy) cy.destroy();
+            cy = cytoscape({
+                container: document.getElementById('cy'),
+                elements,
+                layout: {
+                    name: 'dagre', spacingFactor: 1.75, animate: false,
+                    rankDir: 'TB', ranker: 'longest-path'
+                },
+                style: [
+                    {
+                        selector: 'node',
+                        style: {
+                            'background-color': '#888',
+                            'label': 'data(label)',
+                            'text-valign': 'center',
+                            'color': '#FFF',
+                            'text-outline-width': 1,
+                            'text-outline-color': '#000',
+                            'font-size':'10px',
+                            'font-family': 'Courier New, monospace',
+                            'border-width': 1,
+                            'border-color': '#333'
+                        }
+                    },
+                    { selector: '.ready', style: { 'background-color': '#4CAF50' } },
+                    { selector: '.running', style: { 'background-color': '#2196F3' } },
+                    { selector: '.stopped', style: { 'background-color': '#000' } },
+                    { selector: '.error', style: { 'background-color': '#F44336' } },
+                    { selector: '.stopping', style: { 'background-color': '#FF9800' } },
+                    {
+                        selector: 'edge',
+                        style: {
+                            'width': 2,
+                            'line-color': '#000',
+                            'target-arrow-color': '#000',
+                            'target-arrow-shape': 'triangle',
+                            'curve-style': 'bezier'
+                        }
+                    }
+                ]
+            });
+
+            // Restore saved zoom and position
+            const savedZoom = localStorage.getItem('graph_zoom');
+            const savedPan = localStorage.getItem('graph_pan');
+            if (savedZoom && savedPan) {
+                cy.zoom(parseFloat(savedZoom));
+                cy.pan(JSON.parse(savedPan));
+            }
+
+            // Save zoom and position on change
+            cy.on('zoom pan', () => {
+                localStorage.setItem('graph_zoom', cy.zoom());
+                localStorage.setItem('graph_pan', JSON.stringify(cy.pan()));
+            });
+
+            cy.on('tap', 'node', (e) => {
+                const node = e.target;
+                if (!(isIdle || node.hasClass('ready'))) return;
+                selectedId = node.id();
+                const pos = e.renderedPosition;
+                const delayNs = node.data('delay') || 0;
+                const errorStr = node.data('error') || '';
+                document.getElementById('input-delay').value = Math.round(delayNs / 1e9);
+                document.getElementById('input-error').value = errorStr;
+                showMenu(pos.x, pos.y, selectedId);
+            });
+            cy.on('tap', (e) => {
+                if (e.target === cy) hideMenu();
+            });
+        } else if (zoom !== undefined && pan !== undefined) {
+            cy.zoom(zoom);
+            cy.pan(pan);
+        }
+        isIdle = (data.status === "idle");
+        const statusElement = document.getElementById('status-state');
+        statusElement.textContent = data.status;
+        statusElement.className = data.status;
+        updateToolbarButton();
+        data.components.forEach(comp => {
+            const node = cy.getElementById(String(comp.id));
+            if (node && node.isNode()) {
+                node.className = comp.status || 'pending';
+                node.data('label', comp.name);
+                node.data('delay', comp.delay || 0);
+                node.data('error', comp.error || null);
+                const width = Math.max(1, Math.round((comp.delay || 0) / 1e9));
+                const borderColor = comp.error ? '#F44336' : '#333';
+                node.style({ 'border-width': width, 'border-color': borderColor });
+            }
+        });
+    }
+
+    function updateToolbarButton() {
+        const btn = document.getElementById('start-btn');
+        if (isIdle) {
+            btn.textContent = "Start";
+            btn.onclick = startSystem;
+        } else {
+            btn.textContent = "Reset";
+            btn.onclick = () => {
+                const url = new URL(window.location.href);
+                url.searchParams.set("graph_id", crypto.randomUUID());
+                window.location.href = url.toString();
+            };
+        }
+    }
+
+    function showMenu(x, y, id) {
+        const menu = document.getElementById('menu');
+        document.getElementById('menu-id').textContent = id;
+        selectedId = id;
+        menu.style.left = `${x + 10}px`;
+        menu.style.top = `${y + 10}px`;
+        menu.style.display = 'block';
+    }
+
+    function hideMenu() {
+        document.getElementById('menu').style.display = 'none';
+        selectedId = null;
+    }
+
+    async function sendUpdate() {
+        const delaySeconds = parseInt(document.getElementById('input-delay').value) || 0;
+        const errStr = document.getElementById('input-error').value.trim();
+        const payload = {
+            component_id: selectedId,
+            delay_ms: delaySeconds * 1000,
+            ready_error: errStr === "" ? null : errStr
+        };
+        await fetch(`/component/update?graph_id=${graphId}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        hideMenu();
+    }
+
+    async function sendKill() {
+        await fetch(`/component/kill?component_id=${selectedId}&graph_id=${graphId}`, {
+            method: 'POST'
+        });
+        hideMenu();
+    }
+
+    async function startSystem() {
+        await fetch(`/start?graph_id=${graphId}`, { method: 'POST' });
+        renderGraph(true);
+    }
+
+    async function stopSystem() {
+        await fetch(`/stop?graph_id=${graphId}`, { method: 'POST' });
+    }
+
+    // Initial zoom restoration
+    window.addEventListener('load', () => {
+        const savedZoom = localStorage.getItem('graph_zoom');
+        const savedPan = localStorage.getItem('graph_pan');
+        if (savedZoom && savedPan && cy) {
+            cy.zoom(parseFloat(savedZoom));
+            cy.pan(JSON.parse(savedPan));
+        }
+    });
+
+    renderGraph();
+    setInterval(() => renderGraph(false), 1000);
+</script>
+</body>
+</html>
