@@ -11,7 +11,6 @@ import (
 	"github.com/ognick/goscade"
 	"github.com/ognick/goscade/example/internal/components"
 	"github.com/ognick/goscade/example/internal/domain"
-	"golang.org/x/sync/errgroup"
 )
 
 type logger interface {
@@ -20,17 +19,15 @@ type logger interface {
 }
 
 type graph struct {
-	gracefulCtx      context.Context
-	gracefulShutdown context.CancelFunc
-	runner           *errgroup.Group
-	observer         *components.Observer
-	log              logger
-	lc               goscade.Lifecycle
+	ctx      context.Context
+	shutdown context.CancelFunc
+	observer *components.Observer
+	log      logger
+	lc       goscade.Lifecycle
 }
 
 func newGraph(log logger) *graph {
-	gracefulCtx, gracefulShutdown := context.WithCancel(context.Background())
-	runner := &errgroup.Group{}
+	ctx, shutdown := context.WithCancel(context.Background())
 	observer := components.NewObserver()
 	lc := goscade.NewLifecycle(log)
 
@@ -52,12 +49,11 @@ func newGraph(log logger) *graph {
 	goscade.RegisterComponent(lc, components.NewUserService(observer, userAPI, userRepo, bookSrv))
 
 	return &graph{
-		gracefulCtx:      gracefulCtx,
-		gracefulShutdown: gracefulShutdown,
-		runner:           runner,
-		observer:         observer,
-		log:              log,
-		lc:               lc,
+		ctx:      ctx,
+		shutdown: shutdown,
+		observer: observer,
+		log:      log,
+		lc:       lc,
 	}
 }
 
@@ -122,7 +118,7 @@ func (u *Usecase) StartAll(_ context.Context, graphID string) error {
 		return fmt.Errorf("graph %s has status %s", graphID, status)
 	}
 
-	graph.lc.RunAllComponents(graph.runner, graph.gracefulCtx)
+	graph.lc.RunAllComponents(graph.ctx)
 	return nil
 }
 
@@ -132,7 +128,7 @@ func (u *Usecase) StopAll(ctx context.Context, graphID string) error {
 	if status != goscade.LifecycleStatusReady {
 		return fmt.Errorf("graph %s has status %s", graphID, status)
 	}
-	graph.gracefulShutdown()
+	graph.shutdown()
 	return nil
 }
 

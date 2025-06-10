@@ -4,8 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os/signal"
 	"reflect"
 	"sync"
+	"syscall"
+
+	"golang.org/x/sync/errgroup"
 )
 
 var (
@@ -36,7 +40,7 @@ const (
 type Lifecycle interface {
 	Dependencies() map[Component][]Component
 	Register(component Component)
-	RunAllComponents(runner runner, gracefulCtx context.Context)
+	RunAllComponents(ctx context.Context) func() error
 	Status() LifecycleStatus
 }
 
@@ -100,10 +104,6 @@ func (lc *lifecycle) Status() LifecycleStatus {
 	return lc.status
 }
 
-type runner interface {
-	Go(f func() error)
-}
-
 type componentState struct {
 	probeCtx    context.Context
 	cancelProbe context.CancelCauseFunc
@@ -113,11 +113,85 @@ type componentState struct {
 	allChildrenClosed sync.WaitGroup
 }
 
-//nolint:gocyclo
-func (lc *lifecycle) RunAllComponents(
-	runner runner,
-	gracefulCtx context.Context,
+func (lc *lifecycle) runComponent(
+	lifecycleCtx context.Context,
+	lifecycleCtxCancel context.CancelCauseFunc,
+	comp Component,
+	runner *errgroup.Group,
+	compStates map[Component]*componentState,
+	compToParents map[Component]map[Component]struct{},
 ) {
+	state := compStates[comp]
+	go func() {
+		state.allChildrenClosed.Wait()
+		state.cancelRun(context.Cause(lifecycleCtx))
+	}()
+
+	componentName := reflect.TypeOf(comp).String()
+
+	runner.Go(func() (runErr error) {
+		if parents, ok := compToParents[comp]; ok {
+			// Send close signal to all parents when this component is closed
+			defer func() {
+				state.cancelRun(runErr)
+				state.cancelProbe(runErr)
+				for parent := range parents {
+					compStates[parent].allChildrenClosed.Done()
+				}
+			}()
+
+			//Wait parent probes
+			for parent := range parents {
+				parentState := compStates[parent]
+				<-parentState.probeCtx.Done()
+				if err := context.Cause(parentState.probeCtx); err != nil && !errors.Is(err, context.Canceled) {
+					return err
+				}
+			}
+		}
+
+		err := comp.Run(state.runCtx, state.cancelProbe)
+		if context.Cause(lifecycleCtx) == nil {
+			if err == nil {
+				err = UnexpectedCloseComponentError
+			}
+			lifecycleCtxCancel(CascadeCloseComponentError)
+		}
+		if err == nil {
+			err = context.Cause(lifecycleCtx)
+		}
+
+		switch {
+		case errors.Is(err, CascadeCloseComponentError):
+			lc.log.Infof("Component %s [CASCADE]", componentName)
+		case errors.Is(err, context.Canceled):
+			lc.log.Infof("Component %s [CLOSE]", componentName)
+		case errors.Is(err, nil):
+			lc.log.Infof("Component %s [CLOSE]", componentName)
+		default:
+			lc.log.Errorf("Component %s [ERROR] %v", componentName, err)
+		}
+
+		return err
+	})
+
+	go func() {
+		select {
+		case <-state.probeCtx.Done():
+			if err := context.Cause(state.probeCtx); err != nil && !errors.Is(err, context.Canceled) {
+				lc.log.Errorf("Component %s [PROB ERROR]: %v", componentName, err)
+				lifecycleCtxCancel(CascadeCloseComponentError)
+				return
+			}
+			lc.log.Infof("Component %s [READY]", componentName)
+		}
+	}()
+}
+
+func (lc *lifecycle) RunAllComponents(ctx context.Context) func() error {
+	gracefulCtx, _ := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+
+	errGroup := &errgroup.Group{}
 	lc.setStatus(context.Background(), LifecycleStatusRunning)
 
 	lifecycleCtx, lifecycleCtxCancel := context.WithCancelCause(gracefulCtx)
@@ -215,72 +289,17 @@ func (lc *lifecycle) RunAllComponents(
 		}
 
 		for comp := range readyForRun {
-			state := compStates[comp]
-			go func() {
-				state.allChildrenClosed.Wait()
-				state.cancelRun(context.Cause(lifecycleCtx))
-			}()
-
-			componentName := reflect.TypeOf(comp).String()
 			running[comp] = struct{}{}
-
-			runner.Go(func() (runErr error) {
-				if parents, ok := compToParents[comp]; ok {
-					// Send close signal to all parents when this component is closed
-					defer func() {
-						state.cancelRun(runErr)
-						state.cancelProbe(runErr)
-						for parent := range parents {
-							compStates[parent].allChildrenClosed.Done()
-						}
-					}()
-
-					//Wait parent probes
-					for parent := range parents {
-						parentState := compStates[parent]
-						<-parentState.probeCtx.Done()
-						if err := context.Cause(parentState.probeCtx); err != nil && !errors.Is(err, context.Canceled) {
-							return err
-						}
-					}
-				}
-
-				err := comp.Run(state.runCtx, state.cancelProbe)
-				if context.Cause(lifecycleCtx) == nil {
-					if err == nil {
-						err = UnexpectedCloseComponentError
-					}
-					lifecycleCtxCancel(CascadeCloseComponentError)
-				}
-				if err == nil {
-					err = context.Cause(lifecycleCtx)
-				}
-
-				switch {
-				case errors.Is(err, CascadeCloseComponentError):
-					lc.log.Infof("Component %s [CASCADE]", componentName)
-				case errors.Is(err, context.Canceled):
-					lc.log.Infof("Component %s [CLOSE]", componentName)
-				case errors.Is(err, nil):
-					lc.log.Infof("Component %s [CLOSE]", componentName)
-				default:
-					lc.log.Errorf("Component %s [ERROR] %v", componentName, err)
-				}
-
-				return err
-			})
-
-			go func() {
-				select {
-				case <-state.probeCtx.Done():
-					if err := context.Cause(state.probeCtx); err != nil && !errors.Is(err, context.Canceled) {
-						lc.log.Errorf("Component %s [PROB ERROR]: %v", componentName, err)
-						lifecycleCtxCancel(CascadeCloseComponentError)
-						return
-					}
-					lc.log.Infof("Component %s [READY]", componentName)
-				}
-			}()
+			lc.runComponent(
+				lifecycleCtx,
+				lifecycleCtxCancel,
+				comp,
+				errGroup,
+				compStates,
+				compToParents,
+			)
 		}
 	}
+
+	return errGroup.Wait
 }

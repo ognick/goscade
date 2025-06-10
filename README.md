@@ -44,11 +44,9 @@ import (
 )
 
 func main() {
-    // Create runner and context for graceful shutdown
-    runner, ctx := goscade.CreateRunnerWithGracefulContext()
-	
     // Create lifecycle manager
-    lc := goscade.NewLifecycle(logger)
+	log := logger.NewLogger()
+    lc := goscade.NewLifecycle(log)
 
     // Register components
     lc.Register(&Database{})
@@ -56,10 +54,10 @@ func main() {
 	lc.Register(&Service{})
 	
 	// Start all components
-	lc.RunAllComponents(runner, ctx)
+	waitGracefulShutdown := lc.RunAllComponents(context.Background())
 	// Awaiting graceful shutdown
-	if err := runner.Wait(); err != nil && !errors.Is(err, context.Canceled) {
-		log.Fatalf("%v", err)
+	if err := waitGracefulShutdown(); err != nil && !errors.Is(err, context.Canceled) {
+		log.Errorf("%v", err)
 	}
 }
 ```

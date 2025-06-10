@@ -2,6 +2,7 @@ package goscade
 
 import (
 	"reflect"
+	"sync"
 )
 
 func (lc *lifecycle) findParentComponents(
@@ -75,14 +76,22 @@ func (lc *lifecycle) Dependencies() map[Component][]Component {
 
 func (lc *lifecycle) buildCompToParents() map[Component]map[Component]struct{} {
 	compToParents := make(map[Component]map[Component]struct{})
+	var wg sync.WaitGroup
 	for comp := range lc.components {
-		parents := make(map[Component]struct{})
-		root := reflect.ValueOf(comp)
-		lc.findParentComponents(root, make(map[uintptr]struct{}), parents, 0)
-		if len(parents) > 0 {
-			compToParents[comp] = parents
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			parents := make(map[Component]struct{})
+			root := reflect.ValueOf(comp)
+			lc.findParentComponents(root, make(map[uintptr]struct{}), parents, 0)
+			if len(parents) > 0 {
+				lc.mu.Lock()
+				compToParents[comp] = parents
+				lc.mu.Unlock()
+			}
+		}()
 	}
+	wg.Wait()
 	return compToParents
 }
 

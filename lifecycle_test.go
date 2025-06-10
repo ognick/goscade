@@ -9,8 +9,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"golang.org/x/sync/errgroup"
 )
 
 // Test: mockComponentCyclic is used to create a cyclic dependency
@@ -65,8 +63,6 @@ func TestLifecycle_RunAllComponents_CircularDependency_Panic(t *testing.T) {
 	lcImpl.ptrToComp[reflect.ValueOf(cyclicA).Pointer()] = cyclicA
 	lcImpl.ptrToComp[reflect.ValueOf(cyclicB).Pointer()] = cyclicB
 
-	g, ctx := errgroup.WithContext(context.Background())
-
 	defer func() {
 		rec := recover()
 		if rec == nil {
@@ -78,7 +74,7 @@ func TestLifecycle_RunAllComponents_CircularDependency_Panic(t *testing.T) {
 		}
 	}()
 
-	lc.RunAllComponents(g, ctx)
+	lc.RunAllComponents(context.Background())
 }
 
 // Test: Successful pointer registration
@@ -146,13 +142,12 @@ func TestLifecycle_BuildCompToParents_And_Children(t *testing.T) {
 // Test: Run with no components
 func TestLifecycle_NoComponents(t *testing.T) {
 	lc := NewLifecycle(&mockLogger{})
-	g, ctx := errgroup.WithContext(context.Background())
 	defer func() {
 		if r := recover(); r != nil {
 			t.Fatalf("unexpected panic: %v", r)
 		}
 	}()
-	lc.RunAllComponents(g, ctx)
+	lc.RunAllComponents(context.Background())
 }
 
 // Test: Correct status transitions
@@ -189,11 +184,10 @@ func TestLifecycle_RunAllComponents_GracefulShutdown(t *testing.T) {
 	lcImpl := lc.(*lifecycle)
 	lcImpl.ptrToComp[reflect.ValueOf(comp).Pointer()] = comp
 	cancelCtx, cancel := context.WithCancel(context.Background())
-	g, ctx := errgroup.WithContext(cancelCtx)
 
 	// Start components
 	go func() {
-		lc.RunAllComponents(g, ctx)
+		lc.RunAllComponents(cancelCtx)
 	}()
 
 	// Wait until status becomes Ready
@@ -225,11 +219,10 @@ func TestLifecycle_RunAllComponents_ComponentError(t *testing.T) {
 	lc.Register(comp)
 	lcImpl := lc.(*lifecycle)
 	lcImpl.ptrToComp[reflect.ValueOf(comp).Pointer()] = comp
-	g, ctx := errgroup.WithContext(context.Background())
 
 	// Start components
 	go func() {
-		lc.RunAllComponents(g, ctx)
+		lc.RunAllComponents(context.Background())
 	}()
 
 	// Wait until status becomes Stopped

@@ -12,7 +12,6 @@ import (
 )
 
 func main() {
-	runner, ctx := goscade.CreateRunnerWithGracefulContext()
 	log := pkg.NewLogger(pkg.LoggerCfg{
 		Level:         "info",
 		Development:   true,
@@ -28,10 +27,10 @@ func main() {
 		),
 	))
 
-	lc.RunAllComponents(runner, ctx)
+	waitGracefulShutdown := lc.RunAllComponents(context.Background())
 	log.Info("Server started on http://127.0.0.1:8080")
 	// Awaiting graceful shutdown
-	if err := runner.Wait(); err != nil && !errors.Is(err, context.Canceled) {
+	if err := waitGracefulShutdown(); err != nil && !errors.Is(err, context.Canceled) {
 		log.Fatalf("%v", err)
 	}
 
