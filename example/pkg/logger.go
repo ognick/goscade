@@ -1,9 +1,7 @@
 package pkg
 
 import (
-	"errors"
 	"os"
-	"syscall"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -86,9 +84,6 @@ func (l *Logger) initLogger() {
 	logger := zap.New(core, callerArgs...)
 
 	l.sugarLogger = logger.Sugar()
-	if err := l.sugarLogger.Sync(); err != nil && !errors.Is(err, syscall.ENOTTY) {
-		l.sugarLogger.Error(err)
-	}
 }
 
 // Logger methods

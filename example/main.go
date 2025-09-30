@@ -27,8 +27,14 @@ func main() {
 		),
 	))
 
-	waitGracefulShutdown := lc.RunAllComponents(context.Background())
-	log.Info("Server started on http://127.0.0.1:8080")
+	waitGracefulShutdown := lc.Run(context.Background(), func(err error) {
+		if err != nil {
+			log.Errorf("readiness probe failed: %v", err)
+		} else {
+			log.Info("Server started on http://127.0.0.1:8080")
+		}
+	})
+
 	// Awaiting graceful shutdown
 	if err := waitGracefulShutdown(); err != nil && !errors.Is(err, context.Canceled) {
 		log.Fatalf("%v", err)
