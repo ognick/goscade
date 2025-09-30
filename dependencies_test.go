@@ -4,6 +4,8 @@ import (
 	"context"
 	"reflect"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 // mockComponent implements Component interface for testing
@@ -33,6 +35,17 @@ type ComplexStruct struct {
 }
 
 func (c *ComplexStruct) Run(ctx context.Context, readinessProbe func(cause error)) error {
+	return nil
+}
+
+// RecStruct is used to test recursive structures
+type RecStruct struct {
+	Name string
+	Comp *mockComponent
+	Dep  *RecStruct
+}
+
+func (r *RecStruct) Run(ctx context.Context, readinessProbe func(cause error)) error {
 	return nil
 }
 
@@ -345,4 +358,15 @@ func TestDependencies_ComplexGraph(t *testing.T) {
 	if len(deps[complex]) != 3 {
 		t.Errorf("Expected 3 dependencies for complex struct, got %d", len(deps[complex]))
 	}
+}
+
+// TestBuildCompToParents_CycleGraph tests cycle graph in buildCompToParents
+func TestBuildCompToParents_CycleGraph(t *testing.T) {
+	lc := setupTestLifecycle()
+	comp1 := Register(lc, &mockComponent{name: "test1"})
+	comp2 := Register(lc, &mockComponent{name: "test2"})
+	rec1 := Register(lc, &RecStruct{Name: "rec1", Comp: comp1})
+	rec2 := Register(lc, &RecStruct{Name: "rec2", Comp: comp2, Dep: rec1})
+	rec1.Dep = rec2 // Create cycle
+	assert.Panicsf(t, func() { lc.Dependencies() }, "Expected panic due to cycle in dependencies")
 }

@@ -110,19 +110,6 @@ func (c *BookRepo) Run(ctx context.Context, readinessProbe func(err error)) erro
 	return c.observer.run(ctx, c, readinessProbe)
 }
 
-type RoomRepo struct {
-	observer *Observer
-	deps     []goscade.Component
-}
-
-func NewRoomRepo(observer *Observer, deps ...goscade.Component) goscade.Component {
-	return observer.Register(&RoomRepo{observer: observer, deps: deps})
-}
-
-func (c *RoomRepo) Run(ctx context.Context, readinessProbe func(err error)) error {
-	return c.observer.run(ctx, c, readinessProbe)
-}
-
 type UserAPI struct {
 	observer *Observer
 	deps     []goscade.Component
@@ -149,19 +136,6 @@ func (c *BookAPI) Run(ctx context.Context, readinessProbe func(err error)) error
 	return c.observer.run(ctx, c, readinessProbe)
 }
 
-type RoomAPI struct {
-	observer *Observer
-	deps     []goscade.Component
-}
-
-func NewRoomAPI(observer *Observer, deps ...goscade.Component) goscade.Component {
-	return observer.Register(&RoomAPI{observer: observer, deps: deps})
-}
-
-func (c *RoomAPI) Run(ctx context.Context, readinessProbe func(err error)) error {
-	return c.observer.run(ctx, c, readinessProbe)
-}
-
 type UserService struct {
 	observer *Observer
 	deps     []goscade.Component
@@ -181,22 +155,9 @@ type BookService struct {
 }
 
 func NewBookService(observer *Observer, deps ...goscade.Component) goscade.Component {
-	return observer.Register(&BookService{observer: observer, deps: deps})
-}
-
-func (c *BookService) Run(ctx context.Context, readinessProbe func(err error)) error {
-	return c.observer.run(ctx, c, readinessProbe)
-}
-
-type RoomService struct {
-	observer *Observer
-	deps     []goscade.Component
-}
-
-func NewRoomService(observer *Observer, deps ...goscade.Component) goscade.Component {
-	return observer.Register(&RoomService{observer: observer, deps: deps})
-}
-
-func (c *RoomService) Run(ctx context.Context, readinessProbe func(err error)) error {
-	return c.observer.run(ctx, c, readinessProbe)
+	var comp goscade.Component
+	comp = goscade.NewAdapter(&BookService{observer: observer, deps: deps}, func(ctx context.Context, delegate *BookService, readinessProbe func(err error)) error {
+		return observer.run(ctx, comp, readinessProbe)
+	})
+	return observer.Register(comp)
 }

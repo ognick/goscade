@@ -8,42 +8,78 @@ import (
 	"reflect"
 	"sync"
 	"syscall"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 )
 
 var (
+	// UnexpectedCloseComponentError is returned when a component closes unexpectedly
+	// without being explicitly stopped by the lifecycle manager.
 	UnexpectedCloseComponentError = errors.New("unexpected close component")
-	// GracefulCloseComponentError = errors.New("graceful close component")
+
+	// CascadeCloseComponentError is returned when a component is closed as part
+	// of a cascade shutdown initiated by another component's failure.
 	CascadeCloseComponentError = errors.New("cascade close component")
 )
 
+// logger defines the interface for logging within the lifecycle system.
 type logger interface {
 	Infof(format string, args ...interface{})
 	Errorf(format string, args ...interface{})
 }
 
+// Component represents a component that can be managed by the lifecycle system.
+// Each component must implement the Run method which will be called by the
+// lifecycle manager to start the component.
 type Component interface {
+	// Run starts the component with the provided context and readiness probe.
+	// The readinessProbe function should be called when the component is ready
+	// to serve requests. If called with an error, the component will be marked
+	// as failed and the lifecycle will initiate a shutdown.
 	Run(ctx context.Context, readinessProbe func(cause error)) error
 }
 
+// LifecycleStatus represents the current state of the lifecycle manager.
 type LifecycleStatus string
 
 const (
-	LifecycleStatusIdle     LifecycleStatus = "idle"
-	LifecycleStatusRunning  LifecycleStatus = "running"
-	LifecycleStatusReady    LifecycleStatus = "ready"
+	// LifecycleStatusIdle indicates the lifecycle is not running any components.
+	LifecycleStatusIdle LifecycleStatus = "idle"
+
+	// LifecycleStatusRunning indicates components are starting up.
+	LifecycleStatusRunning LifecycleStatus = "running"
+
+	// LifecycleStatusReady indicates all components are running and ready.
+	LifecycleStatusReady LifecycleStatus = "ready"
+
+	// LifecycleStatusStopping indicates components are shutting down.
 	LifecycleStatusStopping LifecycleStatus = "stopping"
-	LifecycleStatusStopped  LifecycleStatus = "stopped"
+
+	// LifecycleStatusStopped indicates all components have been stopped.
+	LifecycleStatusStopped LifecycleStatus = "stopped"
 )
 
+// Lifecycle manages the lifecycle of components, including their startup,
+// dependency resolution, and graceful shutdown.
 type Lifecycle interface {
+	// Dependencies returns a map showing the dependency graph of all registered components.
 	Dependencies() map[Component][]Component
+
+	// Register adds a component to the lifecycle manager.
+	// The component must be a pointer or interface type.
 	Register(component Component)
-	RunAllComponents(ctx context.Context) func() error
+
+	// Run starts all registered components and returns a function that can be
+	// called to wait for graceful shutdown. The readinessProbe callback is
+	// called when all components are ready or if there's an error during startup.
+	Run(ctx context.Context, readinessProbe func(err error)) func() error
+
+	// Status returns the current status of the lifecycle manager.
 	Status() LifecycleStatus
 }
 
+// lifecycle is the internal implementation of the Lifecycle interface.
 type lifecycle struct {
 	mu             sync.RWMutex
 	status         LifecycleStatus
@@ -51,18 +87,55 @@ type lifecycle struct {
 	components     map[Component]struct{}
 	ptrToComp      map[uintptr]Component
 	log            logger
+
+	ignoreCircularDependency bool
+	startTimeout             time.Duration
 }
 
-func NewLifecycle(log logger) Lifecycle {
-	return &lifecycle{
+// Option is a function type for configuring lifecycle behavior.
+type Option func(*lifecycle)
+
+// WithCircularDependency enables support for circular dependencies.
+// WARNING: This option should be used with caution as it can lead to
+// unpredictable behavior and potential deadlocks. Only use this if you
+// have a specific need and understand the implications.
+func WithCircularDependency() Option {
+	return func(lc *lifecycle) {
+		lc.ignoreCircularDependency = true
+	}
+}
+
+// WithStartTimeout sets the timeout for component startup and readiness probe.
+// Default is 1 minute.
+func WithStartTimeout(timeout time.Duration) Option {
+	return func(lc *lifecycle) {
+		lc.startTimeout = timeout
+	}
+}
+
+// NewLifecycle creates a new lifecycle manager with the provided logger and options.
+// The lifecycle manager will handle component registration, dependency resolution,
+// and graceful shutdown of all registered components.
+func NewLifecycle(log logger, opts ...Option) Lifecycle {
+	lc := &lifecycle{
 		log:            log,
 		status:         LifecycleStatusIdle,
 		statusListener: make(chan LifecycleStatus),
 		components:     make(map[Component]struct{}),
 		ptrToComp:      make(map[uintptr]Component),
+		startTimeout:   time.Minute, // Default 1 minute
 	}
+
+	for _, opt := range opts {
+		opt(lc)
+	}
+
+	return lc
 }
 
+// Register adds a component to the lifecycle manager.
+// The component must be a pointer type for proper dependency detection.
+// This method will panic if a non-pointer component is registered.
 func (lc *lifecycle) Register(comp Component) {
 	val := reflect.ValueOf(comp)
 	if val.Kind() != reflect.Pointer {
@@ -73,6 +146,9 @@ func (lc *lifecycle) Register(comp Component) {
 	lc.ptrToComp[val.Pointer()] = comp
 }
 
+// setStatus updates the lifecycle status with proper state transition validation.
+// It returns true if the status change was successful, false if the transition
+// is not allowed from the current state.
 func (lc *lifecycle) setStatus(ctx context.Context, newStatus LifecycleStatus) bool {
 	lc.mu.Lock()
 	defer lc.mu.Unlock()
@@ -98,208 +174,208 @@ func (lc *lifecycle) setStatus(ctx context.Context, newStatus LifecycleStatus) b
 	return true
 }
 
+// Status returns the current status of the lifecycle manager.
 func (lc *lifecycle) Status() LifecycleStatus {
 	lc.mu.RLock()
 	defer lc.mu.RUnlock()
 	return lc.status
 }
 
+// componentState holds the runtime state for a component including
+// its contexts, cancellation functions, and synchronization primitives.
 type componentState struct {
-	probeCtx    context.Context
-	cancelProbe context.CancelCauseFunc
-	runCtx      context.Context
-	cancelRun   context.CancelCauseFunc
-
-	allChildrenClosed sync.WaitGroup
+	componentName  string
+	probeCtx       context.Context
+	cancelProbe    context.CancelCauseFunc
+	runCtx         context.Context
+	cancelRun      context.CancelCauseFunc
+	teardownCtx    context.Context
+	cancelTeardown context.CancelCauseFunc
 }
 
+func waitCtxErr(ctx context.Context) error {
+	<-ctx.Done()
+	err := context.Cause(ctx)
+	if errors.Is(err, context.Canceled) {
+		return nil
+	}
+	return err
+}
+
+// runComponent starts a component and manages its lifecycle including
+// dependency waiting, readiness probing, and graceful shutdown.
 func (lc *lifecycle) runComponent(
 	lifecycleCtx context.Context,
 	lifecycleCtxCancel context.CancelCauseFunc,
 	comp Component,
 	runner *errgroup.Group,
+	prober *errgroup.Group,
 	compStates map[Component]*componentState,
 	compToParents map[Component]map[Component]struct{},
+	compToChildren map[Component]map[Component]struct{},
+	startLatch chan struct{},
 ) {
 	state := compStates[comp]
+	//  Wait until all parents have started successfully, or any of them has failed
+	waitAllParentProbes := make(chan error)
 	go func() {
-		state.allChildrenClosed.Wait()
-		state.cancelRun(context.Cause(lifecycleCtx))
+		for parentComp := range compToParents[comp] {
+			if err := waitCtxErr(compStates[parentComp].probeCtx); err != nil {
+				waitAllParentProbes <- err
+				break
+			}
+		}
+		waitAllParentProbes <- nil
 	}()
 
-	componentName := reflect.TypeOf(comp).String()
+	//  Wait until all children have finished successfully, or any of them has failed
+	go func() {
+		for childComp := range compToChildren[comp] {
+			if err := waitCtxErr(compStates[childComp].teardownCtx); err != nil {
+				state.cancelRun(err)
+				break
+			}
+		}
+
+		state.cancelRun(waitCtxErr(lifecycleCtx))
+	}()
+
+	// Wait until the component's readiness probe signals ready or failed
+	prober.Go(func() error {
+		probeCtx, cancel := context.WithTimeout(state.probeCtx, lc.startTimeout)
+		defer cancel()
+
+		if err := waitCtxErr(probeCtx); err != nil {
+			lc.log.Errorf("Component %s [PROB ERROR]: %v", state.componentName, err)
+			lifecycleCtxCancel(CascadeCloseComponentError)
+			return err
+		}
+
+		lc.log.Infof("Component %s [READY]", state.componentName)
+		return nil
+	})
 
 	runner.Go(func() (runErr error) {
-		if parents, ok := compToParents[comp]; ok {
-			// Send close signal to all parents when this component is closed
-			defer func() {
-				state.cancelRun(runErr)
-				state.cancelProbe(runErr)
-				for parent := range parents {
-					compStates[parent].allChildrenClosed.Done()
-				}
-			}()
-
-			//Wait parent probes
-			for parent := range parents {
-				parentState := compStates[parent]
-				<-parentState.probeCtx.Done()
-				if err := context.Cause(parentState.probeCtx); err != nil && !errors.Is(err, context.Canceled) {
-					return err
-				}
-			}
+		defer state.cancelTeardown(runErr)
+		<-startLatch
+		err := <-waitAllParentProbes
+		if err != nil && !errors.Is(err, context.Canceled) {
+			state.cancelProbe(err)
+			state.cancelRun(err)
+			return err
 		}
 
-		err := comp.Run(state.runCtx, state.cancelProbe)
-		if context.Cause(lifecycleCtx) == nil {
-			if err == nil {
-				err = UnexpectedCloseComponentError
-			}
-			lifecycleCtxCancel(CascadeCloseComponentError)
-		}
+		err = comp.Run(state.runCtx, state.cancelProbe)
 		if err == nil {
-			err = context.Cause(lifecycleCtx)
+			lifecycleCtxCancel(UnexpectedCloseComponentError)
+		} else {
+			lifecycleCtxCancel(err)
 		}
 
 		switch {
 		case errors.Is(err, CascadeCloseComponentError):
-			lc.log.Infof("Component %s [CASCADE]", componentName)
+			lc.log.Infof("Component %s [CASCADE]", state.componentName)
 		case errors.Is(err, context.Canceled):
-			lc.log.Infof("Component %s [CLOSE]", componentName)
+			lc.log.Infof("Component %s [CLOSE]", state.componentName)
 		case errors.Is(err, nil):
-			lc.log.Infof("Component %s [CLOSE]", componentName)
+			lc.log.Infof("Component %s [CLOSE]", state.componentName)
 		default:
-			lc.log.Errorf("Component %s [ERROR] %v", componentName, err)
+			lc.log.Errorf("Component %s [ERROR] %v", state.componentName, err)
 		}
 
 		return err
 	})
-
-	go func() {
-		select {
-		case <-state.probeCtx.Done():
-			if err := context.Cause(state.probeCtx); err != nil && !errors.Is(err, context.Canceled) {
-				lc.log.Errorf("Component %s [PROB ERROR]: %v", componentName, err)
-				lifecycleCtxCancel(CascadeCloseComponentError)
-				return
-			}
-			lc.log.Infof("Component %s [READY]", componentName)
-		}
-	}()
 }
 
-func (lc *lifecycle) RunAllComponents(ctx context.Context) func() error {
+// Run starts all registered components and returns a function that can be
+// called to wait for graceful shutdown. The method handles:
+// - Dependency resolution and topological sorting
+// - Concurrent component startup
+// - Readiness probing and status management
+// - Graceful shutdown on context cancellation or signals
+// - Error propagation and cascade shutdown
+//
+// The readinessProbe callback is called when all components are ready
+// or if there's an error during startup.
+func (lc *lifecycle) Run(ctx context.Context, readinessProbe func(err error)) func() error {
 	gracefulCtx, _ := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
-
-	errGroup := &errgroup.Group{}
-	lc.setStatus(context.Background(), LifecycleStatusRunning)
-
 	lifecycleCtx, lifecycleCtxCancel := context.WithCancelCause(gracefulCtx)
-	rootStates := make([]*componentState, 0)
-	leafStates := make([]*componentState, 0)
-
 	compToParents := lc.buildCompToParents()
 	compToChildren := lc.buildCompToChildren(compToParents)
-
+	runner := &errgroup.Group{}
+	prober := &errgroup.Group{}
+	startLatch := make(chan struct{})
 	compStates := make(map[Component]*componentState)
 	for comp := range lc.components {
 		state := &componentState{}
+		compStates[comp] = state
 		state.probeCtx, state.cancelProbe = context.WithCancelCause(lifecycleCtx)
+
 		state.runCtx, state.cancelRun = context.WithCancelCause(context.Background())
 
-		compStates[comp] = state
-		if parents, ok := compToParents[comp]; !ok || len(parents) == 0 {
-			rootStates = append(rootStates, state)
-		}
-
-		children, ok := compToChildren[comp]
-		// If the component has children, we can close it only when all children are closed
-		if ok && len(children) > 0 {
-			state.allChildrenClosed.Add(len(children))
-			continue
-		}
-		// Leaf component, no children
-		leafStates = append(leafStates, state)
-		// Fake children to ensure that the component is closed only when graceful context is done
-		state.allChildrenClosed.Add(1)
-	}
-
-	// stop leaf components when lifecycle context is done
-	go func() {
-		<-lifecycleCtx.Done()
-		lc.setStatus(gracefulCtx, LifecycleStatusStopping)
-		for _, s := range leafStates {
-			s.allChildrenClosed.Done()
-		}
-	}()
-
-	// wait for leaf components to finish their readiness probes
-	go func() {
-		var probErr error
-		for _, state := range leafStates {
-			<-state.probeCtx.Done()
-			if err := context.Cause(state.probeCtx); err != nil && !errors.Is(err, context.Canceled) {
-				probErr = err
-			}
-		}
-
-		if probErr == nil {
-			lc.setStatus(gracefulCtx, LifecycleStatusReady)
-		}
-	}()
-
-	go func() {
-		for _, s := range rootStates {
-			<-s.runCtx.Done()
-		}
-
-		lc.setStatus(gracefulCtx, LifecycleStatusStopped)
-		lc.log.Infof("All components are stopped")
-	}()
-
-	running := make(map[Component]struct{})
-	for len(running) < len(lc.components) {
-		readyForRun := make(map[Component]struct{}, len(lc.components)-len(running))
-		for comp := range lc.components {
-			if _, ok := running[comp]; ok {
-				continue
-			}
-
-			parents, ok := compToParents[comp]
-			if !ok || len(parents) == 0 {
-				readyForRun[comp] = struct{}{}
-				continue
-			}
-
-			areAllParentsRunning := true
-			for parent := range parents {
-				if _, ok := running[parent]; !ok {
-					areAllParentsRunning = false
-					break
-				}
-			}
-
-			if areAllParentsRunning {
-				readyForRun[comp] = struct{}{}
-			}
-		}
-
-		if len(readyForRun) == 0 {
-			panic("circular dependency detected")
-		}
-
-		for comp := range readyForRun {
-			running[comp] = struct{}{}
-			lc.runComponent(
-				lifecycleCtx,
-				lifecycleCtxCancel,
-				comp,
-				errGroup,
-				compStates,
-				compToParents,
-			)
+		state.teardownCtx, state.cancelTeardown = context.WithCancelCause(context.Background())
+		state.componentName = reflect.TypeOf(comp).String()
+		if a, ok := comp.(delegateNameProvider); ok {
+			state.componentName = a.delegateName()
 		}
 	}
 
-	return errGroup.Wait
+	for comp := range lc.components {
+		lc.runComponent(
+			lifecycleCtx,
+			lifecycleCtxCancel,
+			comp,
+			runner,
+			prober,
+			compStates,
+			compToParents,
+			compToChildren,
+			startLatch,
+		)
+	}
+
+	// Wait until all components are stopped
+	go func() {
+		if err := waitCtxErr(lifecycleCtx); err != nil {
+			lc.log.Errorf("All components are stopping: %v", err)
+		} else {
+			lc.log.Infof("All components are stopping")
+		}
+		lc.setStatus(ctx, LifecycleStatusStopping)
+	}()
+
+	// Wait until all probes are done (either ready or failed)
+	go func() {
+		probeErr := prober.Wait()
+		if probeErr == nil || errors.Is(probeErr, context.Canceled) {
+			lc.setStatus(ctx, LifecycleStatusReady)
+			probeErr = nil
+		}
+
+		if readinessProbe != nil {
+			readinessProbe(probeErr)
+		}
+	}()
+
+	// Wait until all components are done
+	teardownCtx, cancelTeardown := context.WithCancelCause(context.Background())
+	go func() {
+		err := runner.Wait()
+		if err != nil && !errors.Is(err, context.Canceled) {
+			lc.log.Errorf("All components are stopped: %v", err)
+		} else {
+			lc.log.Infof("All components are stopped")
+		}
+
+		lc.setStatus(ctx, LifecycleStatusStopped)
+		cancelTeardown(err)
+	}()
+
+	lc.setStatus(ctx, LifecycleStatusRunning)
+	close(startLatch)
+
+	return func() error {
+		<-teardownCtx.Done()
+		return context.Cause(teardownCtx)
+	}
 }
