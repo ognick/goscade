@@ -2,6 +2,7 @@ package usecase
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -19,11 +20,12 @@ type logger interface {
 }
 
 type graph struct {
-	ctx      context.Context
-	shutdown context.CancelFunc
-	observer *components.Observer
-	log      logger
-	lc       goscade.Lifecycle
+	ctx                  context.Context
+	shutdown             context.CancelFunc
+	observer             *components.Observer
+	waitGracefulShutdown func() error
+	log                  logger
+	lc                   goscade.Lifecycle
 }
 
 func newGraph(log logger) *graph {
@@ -32,21 +34,21 @@ func newGraph(log logger) *graph {
 	lc := goscade.NewLifecycle(log)
 
 	// infra
-	web := goscade.RegisterComponent(lc, components.NewWebServer(observer))
-	redis := goscade.RegisterComponent(lc, components.NewRedisClient(observer))
-	cache := goscade.RegisterComponent(lc, components.NewLruCache(observer, redis))
-	postgres := goscade.RegisterComponent(lc, components.NewPostgresqlClient(observer))
-	kafka := goscade.RegisterComponent(lc, components.NewKafkaClient(observer))
-	listener := goscade.RegisterComponent(lc, components.NewKafkaListener(observer, kafka))
+	web := goscade.Register(lc, components.NewWebServer(observer))
+	redis := goscade.Register(lc, components.NewRedisClient(observer))
+	cache := goscade.Register(lc, components.NewLruCache(observer, redis))
+	postgres := goscade.Register(lc, components.NewPostgresqlClient(observer))
+	kafka := goscade.Register(lc, components.NewKafkaClient(observer))
+	listener := goscade.Register(lc, components.NewKafkaListener(observer, kafka))
 	// repos
-	bookRepo := goscade.RegisterComponent(lc, components.NewBookRepo(observer, cache, listener))
-	userRepo := goscade.RegisterComponent(lc, components.NewUserRepo(observer, postgres))
+	bookRepo := goscade.Register(lc, components.NewBookRepo(observer, cache, listener))
+	userRepo := goscade.Register(lc, components.NewUserRepo(observer, postgres))
 	// apis
-	bookAPI := goscade.RegisterComponent(lc, components.NewBookAPI(observer, web))
-	userAPI := goscade.RegisterComponent(lc, components.NewUserAPI(observer, listener))
+	bookAPI := goscade.Register(lc, components.NewBookAPI(observer, web))
+	userAPI := goscade.Register(lc, components.NewUserAPI(observer, listener))
 	// services
-	bookSrv := goscade.RegisterComponent(lc, components.NewBookService(observer, bookAPI, bookRepo))
-	goscade.RegisterComponent(lc, components.NewUserService(observer, userAPI, userRepo, bookSrv))
+	bookSrv := goscade.Register(lc, components.NewBookService(observer, bookAPI, bookRepo))
+	goscade.Register(lc, components.NewUserService(observer, userAPI, userRepo, bookSrv))
 
 	return &graph{
 		ctx:      ctx,
@@ -94,9 +96,12 @@ func (u *Usecase) Graph(_ context.Context, graphID string) (domain.Graph, error)
 		}
 
 		cfg := graph.observer.GetCfg(comp)
+		name := strings.ReplaceAll(strings.ReplaceAll(val.Type().String(), "*components.", ""),
+			"*github.com/ognick/goscade/example/internal/components.",
+			"")
 		comps = append(comps, domain.Component{
 			ID:        uint64(val.Pointer()),
-			Name:      strings.ReplaceAll(val.Type().String(), "*components.", ""),
+			Name:      name,
 			DependsOn: dependsOn,
 			Status:    string(graph.observer.GetStatus(comp)),
 			Error:     cfg.Err,
@@ -118,7 +123,13 @@ func (u *Usecase) StartAll(_ context.Context, graphID string) error {
 		return fmt.Errorf("graph %s has status %s", graphID, status)
 	}
 
-	graph.lc.RunAllComponents(graph.ctx)
+	graph.waitGracefulShutdown = graph.lc.Run(graph.ctx, func(err error) {
+		if err != nil {
+			u.log.Errorf("Run graph:%s probe: %v", graphID, err)
+			return
+		}
+		u.log.Infof("Graph %s is ready", graphID)
+	})
 	return nil
 }
 
@@ -129,6 +140,11 @@ func (u *Usecase) StopAll(ctx context.Context, graphID string) error {
 		return fmt.Errorf("graph %s has status %s", graphID, status)
 	}
 	graph.shutdown()
+	err := graph.waitGracefulShutdown()
+	if err != nil && !errors.Is(err, context.Canceled) {
+		return fmt.Errorf("graph %s shutdown: %w", graphID, err)
+	}
+
 	return nil
 }
 

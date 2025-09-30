@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 // Test: mockComponentCyclic is used to create a cyclic dependency
@@ -38,43 +40,66 @@ func (c *CyclicStruct) Run(ctx context.Context, readinessProbe func(error)) erro
 	return nil
 }
 
+func runLifecycle(ctx context.Context, lc Lifecycle) error {
+	sync := make(chan struct{})
+	lc.Run(ctx, func(err error) {
+		close(sync)
+	})
+	select {
+	case <-sync:
+		return nil
+	case <-time.After(1 * time.Second):
+		return context.DeadlineExceeded
+	}
+}
+
 // Test: Circular dependency detection
-func TestLifecycle_RunAllComponents_CircularDependency_Panic(t *testing.T) {
-	lc := NewLifecycle(&mockLogger{})
+func TestLifecycle_Run_CircularDependency(t *testing.T) {
+	tests := []struct {
+		name        string
+		opts        []Option
+		expectPanic bool
+	}{
+		{
+			name:        "panic on circular dependency by default",
+			opts:        nil,
+			expectPanic: true,
+		},
+		{
+			name:        "ignore circular dependency when WithCircularDependency is set",
+			opts:        []Option{WithCircularDependency()},
+			expectPanic: false,
+		},
+	}
 
-	compA := &mockComponentCyclic{}
-	compB := &mockComponentCyclic{dep: compA}
-	compA.dep = compB // create cycle
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lc := NewLifecycle(&mockLogger{}, tt.opts...)
+			compA := &mockComponentCyclic{}
+			compB := &mockComponentCyclic{dep: compA}
+			compA.dep = compB // create cycle
+			lc.Register(compA)
+			lc.Register(compB)
 
-	lc.Register(compA)
-	lc.Register(compB)
-
-	// manually add dependencies to ptrToComp so findParentComponents can see them
-	lcImpl := lc.(*lifecycle)
-	lcImpl.ptrToComp[reflect.ValueOf(compA).Pointer()] = compA
-	lcImpl.ptrToComp[reflect.ValueOf(compB).Pointer()] = compB
-
-	// wrap components in structs with dependencies
-	cyclicA := &CyclicStruct{Dep: compB}
-	cyclicB := &CyclicStruct{Dep: compA}
-
-	lc.Register(cyclicA)
-	lc.Register(cyclicB)
-	lcImpl.ptrToComp[reflect.ValueOf(cyclicA).Pointer()] = cyclicA
-	lcImpl.ptrToComp[reflect.ValueOf(cyclicB).Pointer()] = cyclicB
-
-	defer func() {
-		rec := recover()
-		if rec == nil {
-			t.Fatal("expected panic due to circular dependency, but did not panic")
-		}
-		panicMsg, ok := rec.(string)
-		if !ok || !strings.Contains(panicMsg, "circular dependency detected") {
-			t.Fatalf("unexpected panic message: %v", rec)
-		}
-	}()
-
-	lc.RunAllComponents(context.Background())
+			defer func() {
+				rec := recover()
+				if tt.expectPanic {
+					if rec == nil {
+						t.Fatal("expected panic due to circular dependency, but did not panic")
+					}
+					panicMsg, ok := rec.(string)
+					if !ok || !strings.Contains(panicMsg, "circular dependency detected") {
+						t.Fatalf("unexpected panic message: %v", rec)
+					}
+				} else {
+					if rec != nil {
+						t.Fatalf("did not expect panic, but got: %v", rec)
+					}
+				}
+			}()
+			assert.NoError(t, runLifecycle(context.Background(), lc))
+		})
+	}
 }
 
 // Test: Successful pointer registration
@@ -147,7 +172,8 @@ func TestLifecycle_NoComponents(t *testing.T) {
 			t.Fatalf("unexpected panic: %v", r)
 		}
 	}()
-	lc.RunAllComponents(context.Background())
+
+	assert.NoError(t, runLifecycle(context.Background(), lc))
 }
 
 // Test: Correct status transitions
@@ -177,7 +203,7 @@ func TestLifecycle_Status_Transitions(t *testing.T) {
 }
 
 // Test: Graceful shutdown
-func TestLifecycle_RunAllComponents_GracefulShutdown(t *testing.T) {
+func TestLifecycle_Run_GracefulShutdown(t *testing.T) {
 	lc := NewLifecycle(&mockLogger{})
 	comp := &mockComponentCyclic{}
 	lc.Register(comp)
@@ -187,7 +213,7 @@ func TestLifecycle_RunAllComponents_GracefulShutdown(t *testing.T) {
 
 	// Start components
 	go func() {
-		lc.RunAllComponents(cancelCtx)
+		assert.NoError(t, runLifecycle(cancelCtx, lc))
 	}()
 
 	// Wait until status becomes Ready
@@ -213,7 +239,7 @@ func (e *errorComponent) Run(ctx context.Context, readinessProbe func(error)) er
 }
 
 // Test: Component error causes lifecycle to stop
-func TestLifecycle_RunAllComponents_ComponentError(t *testing.T) {
+func TestLifecycle_Run_ComponentError(t *testing.T) {
 	lc := NewLifecycle(&mockLogger{})
 	comp := &errorComponent{}
 	lc.Register(comp)
@@ -222,11 +248,402 @@ func TestLifecycle_RunAllComponents_ComponentError(t *testing.T) {
 
 	// Start components
 	go func() {
-		lc.RunAllComponents(context.Background())
+		assert.NoError(t, runLifecycle(context.Background(), lc))
 	}()
 
 	// Wait until status becomes Stopped
 	for lc.Status() != LifecycleStatusStopped {
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// Test: NewAdapter creates an adapter with correct delegate and run function
+func TestNewAdapter_Run(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+
+	var probeCalled bool
+	adapter := NewAdapter(&mockComponentCyclic{}, func(ctx context.Context, delegate *mockComponentCyclic, probe func(error)) error {
+		probeCalled = true
+		probe(nil)
+		<-ctx.Done()
+		return nil
+	})
+
+	assert.NotNil(t, adapter)
+	assert.Implements(t, (*Component)(nil), adapter)
+
+	lc := NewLifecycle(&mockLogger{})
+	lc.Register(adapter)
+
+	readinessProbe := make(chan error)
+	waitGracefulShutdown := lc.Run(ctx, func(err error) {
+		readinessProbe <- err
+	})
+
+	assert.NoError(t, <-readinessProbe)
+	assert.True(t, probeCalled, "Readiness probe should have been called")
+
+	cancel()
+	assert.EqualError(t, waitGracefulShutdown(), "context canceled")
+}
+
+// Test: adapter delegateName returns correct type string
+func TestAdapter_DelegateName(t *testing.T) {
+	mockDelegate := &mockComponentCyclic{}
+	adapter := NewAdapter(mockDelegate, func(ctx context.Context, delegate *mockComponentCyclic, probe func(error)) error {
+		probe(nil)
+		<-ctx.Done()
+		return nil
+	})
+
+	// Cast to adapter to access delegateName method
+	adapterImpl := adapter.(interface{ delegateName() string })
+	name := adapterImpl.delegateName()
+
+	expectedName := reflect.TypeOf(mockDelegate).String()
+	assert.Equal(t, expectedName, name)
+}
+
+// Test: adapter Run method handles errors correctly
+func TestAdapter_Run_Error(t *testing.T) {
+	mockDelegate := &mockComponentCyclic{}
+	expectedError := errors.New("test error")
+
+	adapter := NewAdapter(mockDelegate, func(ctx context.Context, delegate *mockComponentCyclic, probe func(error)) error {
+		probe(nil)
+		return expectedError
+	})
+
+	ctx := context.Background()
+	err := adapter.Run(ctx, func(err error) {})
+
+	assert.Equal(t, expectedError, err)
+}
+
+// customComponent implements delegateNameProvider for testing
+type customComponent struct {
+	name string
+}
+
+func (c *customComponent) Run(ctx context.Context, readinessProbe func(error)) error {
+	readinessProbe(nil)
+	<-ctx.Done()
+	return nil
+}
+
+func (c *customComponent) delegateName() string {
+	return c.name
+}
+
+// Test: runComponent with delegateNameProvider
+func TestRunComponent_DelegateNameProvider(t *testing.T) {
+	lc := NewLifecycle(&mockLogger{})
+
+	comp := &customComponent{name: "CustomComponent"}
+	lc.Register(comp)
+
+	// Run lifecycle to test delegateNameProvider functionality
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	readinessProbe := make(chan error)
+	waitGracefulShutdown := lc.Run(ctx, func(err error) {
+		readinessProbe <- err
+	})
+
+	assert.NoError(t, <-readinessProbe)
+
+	// Wait for graceful shutdown
+	err := waitGracefulShutdown()
+	assert.Error(t, err) // Should be context deadline exceeded or canceled
+}
+
+// Test: runComponent with parent dependency failure
+func TestRunComponent_ParentDependencyFailure(t *testing.T) {
+	lc := NewLifecycle(&mockLogger{})
+
+	// Create parent component that will fail
+	parentComp := &errorComponent{}
+	childComp := &mockComponentCyclic{dep: parentComp}
+
+	lc.Register(parentComp)
+	lc.Register(childComp)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	readinessProbe := make(chan error)
+	waitGracefulShutdown := lc.Run(ctx, func(err error) {
+		readinessProbe <- err
+	})
+
+	<-readinessProbe
+	// Wait for graceful shutdown
+	shutdownErr := waitGracefulShutdown()
+	assert.EqualError(t, shutdownErr, "component error")
+}
+
+// cascadeComponent causes cascade shutdown for testing
+type cascadeComponent struct{}
+
+func (c *cascadeComponent) Run(ctx context.Context, readinessProbe func(error)) error {
+	readinessProbe(nil)
+	// Return an error to trigger cascade shutdown
+	return errors.New("component error")
+}
+
+// Test: runComponent with cascade shutdown
+func TestRunComponent_CascadeShutdown(t *testing.T) {
+	lc := NewLifecycle(&mockLogger{})
+
+	comp := &cascadeComponent{}
+	lc.Register(comp)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	readinessProbe := make(chan error)
+	waitGracefulShutdown := lc.Run(ctx, func(err error) {
+		readinessProbe <- err
+	})
+
+	// Should get a response from readiness probe
+	_ = <-readinessProbe
+	// The readiness probe might succeed initially, but the component will fail later
+	// So we just check that we get a response (could be nil or error)
+
+	// Wait for graceful shutdown
+	shutdownErr := waitGracefulShutdown()
+	assert.Error(t, shutdownErr)
+}
+
+// probeErrorComponent fails readiness probe for testing
+type probeErrorComponent struct{}
+
+func (c *probeErrorComponent) Run(ctx context.Context, readinessProbe func(error)) error {
+	// Call readiness probe with error
+	readinessProbe(errors.New("probe error"))
+	<-ctx.Done()
+	return nil
+}
+
+// Test: runComponent with probe error
+func TestRunComponent_ProbeError(t *testing.T) {
+	lc := NewLifecycle(&mockLogger{})
+
+	comp := &probeErrorComponent{}
+	lc.Register(comp)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	readinessProbe := make(chan error)
+	waitGracefulShutdown := lc.Run(ctx, func(err error) {
+		readinessProbe <- err
+	})
+
+	// Should get an error due to probe failure
+	err := <-readinessProbe
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "probe error")
+
+	// Wait for graceful shutdown
+	shutdownErr := waitGracefulShutdown()
+	assert.Error(t, shutdownErr)
+}
+
+// unexpectedCloseComponent closes without error for testing
+type unexpectedCloseComponent struct{}
+
+func (c *unexpectedCloseComponent) Run(ctx context.Context, readinessProbe func(error)) error {
+	readinessProbe(nil)
+	// Return nil without waiting for context cancellation
+	return nil
+}
+
+// Test: runComponent with unexpected close
+func TestRunComponent_UnexpectedClose(t *testing.T) {
+	lc := NewLifecycle(&mockLogger{})
+
+	comp := &unexpectedCloseComponent{}
+	lc.Register(comp)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	readinessProbe := make(chan error)
+	waitGracefulShutdown := lc.Run(ctx, func(err error) {
+		readinessProbe <- err
+	})
+
+	// Should get a response from readiness probe
+	_ = <-readinessProbe
+	// The readiness probe might succeed initially, but the component will fail later
+	// So we just check that we get a response (could be nil or error)
+
+	// Wait for graceful shutdown
+	shutdownErr := waitGracefulShutdown()
+	assert.Error(t, shutdownErr)
+}
+
+// slowStartComponent takes time to start for timeout testing
+type slowStartComponent struct {
+	delay time.Duration
+}
+
+func (c *slowStartComponent) Run(ctx context.Context, readinessProbe func(error)) error {
+	// Wait longer than the timeout before calling readiness probe
+	time.Sleep(c.delay)
+	readinessProbe(nil)
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// slowStopComponent takes time to stop for timeout testing
+type slowStopComponent struct {
+	stopDelay time.Duration
+}
+
+func (c *slowStopComponent) Run(ctx context.Context, readinessProbe func(error)) error {
+	readinessProbe(nil)
+	// Wait for context cancellation, then take time to stop
+	<-ctx.Done()
+	time.Sleep(c.stopDelay)
+	return ctx.Err()
+}
+
+// TestTimeout_StartTimeout tests that components timeout during startup
+func TestTimeout_StartTimeout(t *testing.T) {
+	lc := NewLifecycle(&mockLogger{}, WithStartTimeout(100*time.Millisecond))
+
+	// Component that takes longer than timeout to start
+	comp := &slowStartComponent{delay: 200 * time.Millisecond}
+	lc.Register(comp)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	readinessProbe := make(chan error)
+	waitGracefulShutdown := lc.Run(ctx, func(err error) {
+		readinessProbe <- err
+	})
+
+	// Should get timeout error
+	err := <-readinessProbe
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+
+	// Wait for graceful shutdown
+	shutdownErr := waitGracefulShutdown()
+	assert.ErrorIs(t, shutdownErr, context.Canceled)
+}
+
+// TestTimeout_DefaultTimeouts tests that default timeouts work correctly
+func TestTimeout_DefaultTimeouts(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	lc := NewLifecycle(&mockLogger{}) // No custom timeouts, should use defaults
+
+	// Component that starts quickly
+	comp := &mockComponentCyclic{}
+	lc.Register(comp)
+
+	readinessProbe := make(chan error)
+	waitGracefulShutdown := lc.Run(ctx, func(err error) {
+		readinessProbe <- err
+	})
+
+	// Should succeed with default timeout (1 minute)
+	err := <-readinessProbe
+	assert.NoError(t, err)
+
+	cancel()
+
+	// Wait for graceful shutdown
+	shutdownErr := waitGracefulShutdown()
+	assert.ErrorIs(t, shutdownErr, context.Canceled)
+}
+
+// TestLifecycle_AsComponent tests that a lifecycle can be registered as a component in another lifecycle
+func TestLifecycle_AsComponent(t *testing.T) {
+	// Create parent lifecycle
+	log := &mockLogger{}
+	parentLC := NewLifecycle(log)
+
+	// Create child lifecycle with a component
+	childLog := &mockLogger{}
+	childLC := NewLifecycle(childLog)
+	// Add a component to child lifecycle
+	childLC.Register(&mockComponentCyclic{})
+
+	// Wrap child lifecycle as a component
+	parentLC.Register(LifecycleAsComponent(childLC))
+
+	// Add another component to parent lifecycle
+	parentComp := &mockComponentCyclic{}
+	parentLC.Register(parentComp)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+
+	readinessProbe := make(chan error)
+	waitGracefulShutdown := parentLC.Run(ctx, func(err error) {
+		readinessProbe <- err
+	})
+
+	// Wait for readiness probe - should succeed
+	err := <-readinessProbe
+	assert.NoError(t, err)
+
+	// Verify both lifecycles are running
+	assert.Equal(t, LifecycleStatusReady, parentLC.Status())
+	cancel()
+
+	// Wait for graceful shutdown
+	shutdownErr := waitGracefulShutdown()
+	assert.ErrorIs(t, shutdownErr, context.Canceled)
+}
+
+// TestLifecycle_NestedLifecycleWithDependencies tests nested lifecycles with dependencies
+func TestLifecycle_NestedLifecycleWithDependencies(t *testing.T) {
+	// Create parent lifecycle
+	parentLog := &mockLogger{}
+	parentLC := NewLifecycle(parentLog)
+
+	// Create child lifecycle with dependencies
+	childLog := &mockLogger{}
+	childLC := NewLifecycle(childLog)
+
+	// Add components with dependencies to child lifecycle
+	childDB := &mockComponentCyclic{}
+	childCache := &mockComponentCyclic{dep: childDB}
+	childService := &mockComponentCyclic{dep: childCache}
+
+	childLC.Register(childDB)
+	childLC.Register(childCache)
+	childLC.Register(childService)
+
+	// Wrap child lifecycle as a component
+	childLCAsComponent := LifecycleAsComponent(childLC)
+	parentLC.Register(childLCAsComponent)
+
+	// Add parent-level component
+	parentService := &mockComponentCyclic{}
+	parentLC.Register(parentService)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+
+	readinessProbe := make(chan error)
+	waitGracefulShutdown := parentLC.Run(ctx, func(err error) {
+		readinessProbe <- err
+	})
+
+	// Wait for readiness probe - should succeed
+	err := <-readinessProbe
+	assert.NoError(t, err)
+
+	// Verify parent lifecycle is ready
+	assert.Equal(t, LifecycleStatusReady, parentLC.Status())
+	cancel()
+
+	// Wait for graceful shutdown
+	shutdownErr := waitGracefulShutdown()
+	assert.ErrorIs(t, shutdownErr, context.Canceled)
 }
