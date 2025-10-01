@@ -7,15 +7,15 @@ import (
 	"testing"
 )
 
-// Test: RegisterComponent helper function
-func TestRegisterComponent(t *testing.T) {
+// Test: Register helper function
+func TestRegister(t *testing.T) {
 	lc := NewLifecycle(&mockLogger{})
 	comp := &mockComponentCyclic{}
 
-	// Test: RegisterComponent returns the same component
-	result := RegisterComponent(lc, comp)
+	// Test: Register returns the same component
+	result := Register(lc, comp)
 	if result != comp {
-		t.Error("RegisterComponent should return the same component")
+		t.Error("Register should return the same component")
 	}
 
 	// Test: Component is actually registered
@@ -28,15 +28,15 @@ func TestRegisterComponent(t *testing.T) {
 	}
 }
 
-// Test: RegisterComponent with nil component
-func TestRegisterComponent_Nil(t *testing.T) {
+// Test: Register with nil component
+func TestRegister_Nil(t *testing.T) {
 	lc := NewLifecycle(&mockLogger{})
 	defer func() {
 		if r := recover(); r == nil {
 			t.Error("expected panic when registering nil component")
 		}
 	}()
-	RegisterComponent[Component](lc, nil)
+	Register[Component](lc, nil)
 }
 
 // nonPointerComponent is a component with value receiver for Run method
@@ -48,8 +48,8 @@ func (c nonPointerComponent) Run(ctx context.Context, readinessProbe func(error)
 	return nil
 }
 
-// Test: RegisterComponent with non-pointer component
-func TestRegisterComponent_NonPointer(t *testing.T) {
+// Test: Register with non-pointer component
+func TestRegister_NonPointer(t *testing.T) {
 	lc := NewLifecycle(&mockLogger{})
 	comp := nonPointerComponent{} // Create value, not pointer
 	defer func() {
@@ -57,5 +57,5 @@ func TestRegisterComponent_NonPointer(t *testing.T) {
 			t.Error("expected panic when registering non-pointer component")
 		}
 	}()
-	RegisterComponent[Component](lc, comp)
+	Register[Component](lc, comp)
 }
