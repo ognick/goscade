@@ -77,6 +77,9 @@ type Lifecycle interface {
 
 	// Status returns the current status of the lifecycle manager.
 	Status() LifecycleStatus
+
+	// AsComponent wraps the lifecycle manager as a Component that can be registered with another lifecycle.
+	AsComponent() Component
 }
 
 // lifecycle is the internal implementation of the Lifecycle interface.
@@ -193,6 +196,8 @@ type componentState struct {
 	cancelTeardown context.CancelCauseFunc
 }
 
+// waitCtxErr waits for a context to be done and returns the cause of cancellation.
+// If the context was canceled (not timed out), it returns nil.
 func waitCtxErr(ctx context.Context) error {
 	<-ctx.Done()
 	err := context.Cause(ctx)
@@ -376,6 +381,18 @@ func (lc *lifecycle) Run(ctx context.Context, readinessProbe func(err error)) fu
 
 	return func() error {
 		<-teardownCtx.Done()
+		lifecycleCtxCancel(context.Canceled)
 		return context.Cause(teardownCtx)
 	}
+}
+
+// AsComponent wraps the lifecycle manager as a Component that can be registered with another lifecycle.
+// This allows for nested lifecycle management where one lifecycle can be managed as a component
+// within another lifecycle.
+func (lc *lifecycle) AsComponent() Component {
+	return NewAdapter(lc, func(ctx context.Context, lc *lifecycle, readinessProbe func(cause error)) error {
+		stop := lc.Run(ctx, readinessProbe)
+		<-ctx.Done()
+		return stop()
+	})
 }

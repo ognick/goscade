@@ -18,7 +18,6 @@ type delegateNameProvider interface {
 // adapter wraps a delegate component and provides a way to run it
 // with custom logic while maintaining the Component interface.
 type adapter[T any] struct {
-	delegateNameProvider
 	delegate T
 	run      runFn[T]
 }

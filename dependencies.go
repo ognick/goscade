@@ -6,67 +6,74 @@ import (
 	"sync"
 )
 
-// findParentComponents recursively traverses a component's structure to find
-// all parent components it depends on. It uses reflection to examine fields,
+// findParentComponents performs a breadth-first search traversal of a component's structure
+// to find all parent components it depends on. It uses reflection to examine fields,
 // slices, arrays, maps, and nested structures.
 //
 // Parameters:
-//   - val: the reflect.Value to examine
-//   - visited: map to track visited pointers and prevent infinite loops
+//   - root: Component to examine
+//
+// Returns:
 //   - parents: map to collect found parent components
-//   - depth: current recursion depth (0 for root component)
-func (lc *lifecycle) findParentComponents(
-	val reflect.Value,
-	visited map[uintptr]struct{},
-	parents map[Component]struct{},
-	depth uint64,
-) {
-	if val.Kind() == reflect.Interface {
-		val = val.Elem()
-	}
+func (lc *lifecycle) findParentComponents(root Component) map[Component]struct{} {
+	parents := make(map[Component]struct{})
 
-	if val.Kind() == reflect.Pointer {
-		ptr := val.Pointer()
-		if _, seen := visited[ptr]; seen {
-			return
+	queue := FIFOQueue[reflect.Value]{}
+	visited := make(map[uintptr]struct{})
+
+	queue.Push(reflect.ValueOf(root))
+	var initialized bool
+	for !queue.IsEmpty() {
+		val, _ := queue.Pop()
+		if val.Kind() == reflect.Interface {
+			val = val.Elem()
 		}
 
-		visited[ptr] = struct{}{}
-		if depth > 0 {
-			if comp, ok := lc.ptrToComp[ptr]; ok {
-				parents[comp] = struct{}{}
-				return
+		if val.Kind() == reflect.Pointer {
+			ptr := val.Pointer()
+			if _, seen := visited[ptr]; seen {
+				continue
 			}
+
+			visited[ptr] = struct{}{}
+			if initialized {
+				if comp, ok := lc.ptrToComp[ptr]; ok {
+					parents[comp] = struct{}{}
+					continue
+				}
+			}
+			initialized = true
+		}
+
+		switch val.Kind() {
+		case reflect.Struct:
+			for i := 0; i < val.NumField(); i++ {
+				queue.Push(val.Field(i))
+			}
+
+		case reflect.Interface, reflect.Pointer:
+			queue.Push(val.Elem())
+
+		case reflect.Slice, reflect.Array:
+			for i := 0; i < val.Len(); i++ {
+				queue.Push(val.Index(i))
+			}
+
+		case reflect.Map:
+			iter := val.MapRange()
+			for iter.Next() {
+				queue.Push(iter.Key())
+				queue.Push(iter.Value())
+			}
+		default:
+			continue
 		}
 	}
 
-	switch val.Kind() {
-	case reflect.Struct:
-		for i := 0; i < val.NumField(); i++ {
-			field := val.Field(i)
-			lc.findParentComponents(field, visited, parents, depth+1)
-		}
-
-	case reflect.Interface, reflect.Pointer:
-		lc.findParentComponents(val.Elem(), visited, parents, depth+1)
-
-	case reflect.Slice, reflect.Array:
-		for i := 0; i < val.Len(); i++ {
-			lc.findParentComponents(val.Index(i), visited, parents, depth+1)
-		}
-
-	case reflect.Map:
-		iter := val.MapRange()
-		for iter.Next() {
-			lc.findParentComponents(iter.Key(), visited, parents, depth+1)
-			lc.findParentComponents(iter.Value(), visited, parents, depth+1)
-		}
-	default:
-		return
-	}
+	return parents
 }
 
-// findCircularDependencies finds and probably removes components that are part of circular
+// findCircularDependencies finds and optionally removes components that are part of circular
 // dependency chains from the component-to-parents mapping. It uses BFS
 // traversal to detect cycles and removes components that would create
 // circular dependencies.
@@ -79,9 +86,9 @@ func findCircularDependencies(
 ) {
 	for root := range compToParents {
 		queue := FIFOQueue[Component]{}
-		queue.Enqueue(root)
+		queue.Push(root)
 		for !queue.IsEmpty() {
-			node, _ := queue.Dequeue()
+			node, _ := queue.Pop()
 			for parent := range compToParents[node] {
 				if parent == root {
 					if removeCircularDependency {
@@ -95,7 +102,7 @@ func findCircularDependencies(
 					))
 				}
 
-				queue.Enqueue(parent)
+				queue.Push(parent)
 			}
 		}
 	}
@@ -141,16 +148,13 @@ func (lc *lifecycle) buildCompToParents() map[Component]map[Component]struct{} {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			parents := make(map[Component]struct{})
-			root := reflect.ValueOf(comp)
-			lc.findParentComponents(root, make(map[uintptr]struct{}), parents, 0)
-			if len(parents) > 0 {
-				lc.mu.Lock()
-				compToParents[comp] = parents
-				lc.mu.Unlock()
-			}
+			parents := lc.findParentComponents(comp)
+			lc.mu.Lock()
+			compToParents[comp] = parents
+			lc.mu.Unlock()
 		}()
 	}
+
 	wg.Wait()
 	findCircularDependencies(compToParents, lc.ignoreCircularDependency)
 	return compToParents

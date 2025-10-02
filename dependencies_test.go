@@ -67,10 +67,7 @@ func setupTestLifecycle() *lifecycle {
 // TestFindParentComponents_Empty tests findParentComponents with empty values
 func TestFindParentComponents_Empty(t *testing.T) {
 	lc := setupTestLifecycle()
-	visited := make(map[uintptr]struct{})
-	parents := make(map[Component]struct{})
-
-	lc.findParentComponents(reflect.ValueOf(nil), visited, parents, 0)
+	parents := lc.findParentComponents(nil)
 	if len(parents) != 0 {
 		t.Errorf("Expected empty parents map, got %d elements", len(parents))
 	}
@@ -79,11 +76,9 @@ func TestFindParentComponents_Empty(t *testing.T) {
 // TestFindParentComponents_Interface tests findParentComponents with interfaces
 func TestFindParentComponents_Interface(t *testing.T) {
 	lc := setupTestLifecycle()
-	visited := make(map[uintptr]struct{})
-	parents := make(map[Component]struct{})
 
-	var i interface{} = &mockComponent{name: "test"}
-	lc.findParentComponents(reflect.ValueOf(i), visited, parents, 0)
+	comp := &mockComponent{name: "test"}
+	parents := lc.findParentComponents(comp)
 	if len(parents) != 0 {
 		t.Errorf("Expected empty parents map for interface, got %d elements", len(parents))
 	}
@@ -92,14 +87,12 @@ func TestFindParentComponents_Interface(t *testing.T) {
 // TestFindParentComponents_Pointer tests findParentComponents with pointers
 func TestFindParentComponents_Pointer(t *testing.T) {
 	lc := setupTestLifecycle()
-	visited := make(map[uintptr]struct{})
-	parents := make(map[Component]struct{})
 
 	comp := &mockComponent{name: "test"}
 	lc.ptrToComp[reflect.ValueOf(comp).Pointer()] = comp
 
-	lc.findParentComponents(reflect.ValueOf(comp), visited, parents, 1)
-	if len(parents) != 1 {
+	parents := lc.findParentComponents(comp)
+	if len(parents) != 0 {
 		t.Errorf("Expected 1 parent, got %d", len(parents))
 	}
 }
@@ -107,14 +100,12 @@ func TestFindParentComponents_Pointer(t *testing.T) {
 // TestFindParentComponents_Struct tests findParentComponents with structs
 func TestFindParentComponents_Struct(t *testing.T) {
 	lc := setupTestLifecycle()
-	visited := make(map[uintptr]struct{})
-	parents := make(map[Component]struct{})
 
 	comp := &mockComponent{name: "test"}
 	lc.ptrToComp[reflect.ValueOf(comp).Pointer()] = comp
 
-	testStruct := TestStruct{Dep1: comp}
-	lc.findParentComponents(reflect.ValueOf(testStruct), visited, parents, 0)
+	testStruct := &TestStruct{Dep1: comp}
+	parents := lc.findParentComponents(testStruct)
 	if len(parents) != 1 {
 		t.Errorf("Expected 1 parent, got %d", len(parents))
 	}
@@ -162,49 +153,58 @@ func TestBuildCompToChildren_Empty(t *testing.T) {
 	}
 }
 
+type sliceMockComponent struct {
+	mockComponent
+	arr []*mockComponent
+}
+
 // TestFindParentComponents_Slice tests findParentComponents with slices
 func TestFindParentComponents_Slice(t *testing.T) {
 	lc := setupTestLifecycle()
-	visited := make(map[uintptr]struct{})
-	parents := make(map[Component]struct{})
 
 	comp := &mockComponent{name: "test"}
 	lc.ptrToComp[reflect.ValueOf(comp).Pointer()] = comp
 
-	slice := []*mockComponent{comp}
-	lc.findParentComponents(reflect.ValueOf(slice), visited, parents, 0)
+	slice := &sliceMockComponent{arr: []*mockComponent{comp}}
+	parents := lc.findParentComponents(slice)
 	if len(parents) != 1 {
 		t.Errorf("Expected 1 parent, got %d", len(parents))
 	}
+}
+
+type arrayMockComponent struct {
+	mockComponent
+	arr [1]*mockComponent
 }
 
 // TestFindParentComponents_Array tests findParentComponents with arrays
 func TestFindParentComponents_Array(t *testing.T) {
 	lc := setupTestLifecycle()
-	visited := make(map[uintptr]struct{})
-	parents := make(map[Component]struct{})
 
 	comp := &mockComponent{name: "test"}
 	lc.ptrToComp[reflect.ValueOf(comp).Pointer()] = comp
 
-	array := [1]*mockComponent{comp}
-	lc.findParentComponents(reflect.ValueOf(array), visited, parents, 0)
+	array := &arrayMockComponent{arr: [1]*mockComponent{comp}}
+	parents := lc.findParentComponents(array)
 	if len(parents) != 1 {
 		t.Errorf("Expected 1 parent, got %d", len(parents))
 	}
 }
 
+type mapMockComponent struct {
+	mockComponent
+	m map[string]*mockComponent
+}
+
 // TestFindParentComponents_Map tests findParentComponents with maps
 func TestFindParentComponents_Map(t *testing.T) {
 	lc := setupTestLifecycle()
-	visited := make(map[uintptr]struct{})
-	parents := make(map[Component]struct{})
 
 	comp := &mockComponent{name: "test"}
 	lc.ptrToComp[reflect.ValueOf(comp).Pointer()] = comp
 
-	m := map[string]*mockComponent{"test": comp}
-	lc.findParentComponents(reflect.ValueOf(m), visited, parents, 0)
+	m := &mapMockComponent{m: map[string]*mockComponent{"test": comp}}
+	parents := lc.findParentComponents(m)
 	if len(parents) != 1 {
 		t.Errorf("Expected 1 parent, got %d", len(parents))
 	}
@@ -213,8 +213,6 @@ func TestFindParentComponents_Map(t *testing.T) {
 // TestFindParentComponents_NestedStruct tests findParentComponents with nested structs
 func TestFindParentComponents_NestedStruct(t *testing.T) {
 	lc := setupTestLifecycle()
-	visited := make(map[uintptr]struct{})
-	parents := make(map[Component]struct{})
 
 	comp := &mockComponent{name: "test"}
 	lc.ptrToComp[reflect.ValueOf(comp).Pointer()] = comp
@@ -224,13 +222,15 @@ func TestFindParentComponents_NestedStruct(t *testing.T) {
 	}
 
 	type OuterStruct struct {
+		mockComponent
 		Inner InnerStruct
 	}
 
-	outer := OuterStruct{
+	outer := &OuterStruct{
 		Inner: InnerStruct{Comp: comp},
 	}
-	lc.findParentComponents(reflect.ValueOf(outer), visited, parents, 0)
+
+	parents := lc.findParentComponents(outer)
 	if len(parents) != 1 {
 		t.Errorf("Expected 1 parent, got %d", len(parents))
 	}
@@ -239,16 +239,14 @@ func TestFindParentComponents_NestedStruct(t *testing.T) {
 // TestFindParentComponents_MultipleDeps tests findParentComponents with multiple dependencies
 func TestFindParentComponents_MultipleDeps(t *testing.T) {
 	lc := setupTestLifecycle()
-	visited := make(map[uintptr]struct{})
-	parents := make(map[Component]struct{})
 
 	comp1 := &mockComponent{name: "test1"}
 	comp2 := &mockComponent{name: "test2"}
 	lc.ptrToComp[reflect.ValueOf(comp1).Pointer()] = comp1
 	lc.ptrToComp[reflect.ValueOf(comp2).Pointer()] = comp2
 
-	testStruct := TestStruct{Dep1: comp1, Dep2: comp2}
-	lc.findParentComponents(reflect.ValueOf(testStruct), visited, parents, 0)
+	testStruct := &TestStruct{Dep1: comp1, Dep2: comp2}
+	parents := lc.findParentComponents(testStruct)
 	if len(parents) != 2 {
 		t.Errorf("Expected 2 parents, got %d", len(parents))
 	}
@@ -284,7 +282,7 @@ func TestBuildCompToParents_WithDeps(t *testing.T) {
 	testStruct := &TestStruct{Dep1: comp1}
 	lc.Register(testStruct)
 	parents := lc.buildCompToParents()
-	if len(parents) != 1 {
+	if len(parents) != 3 {
 		t.Errorf("Expected 1 component with parents, got %d", len(parents))
 	}
 	if len(parents[testStruct]) != 1 {
@@ -315,17 +313,16 @@ func TestBuildCompToChildren_WithDeps(t *testing.T) {
 // TestFindParentComponents_CircularDeps tests findParentComponents with circular dependencies
 func TestFindParentComponents_CircularDeps(t *testing.T) {
 	lc := setupTestLifecycle()
-	visited := make(map[uintptr]struct{})
-	parents := make(map[Component]struct{})
 
 	type CircularStruct struct {
+		mockComponent
 		Self *CircularStruct
 	}
 
 	circular := &CircularStruct{}
 	circular.Self = circular
 
-	lc.findParentComponents(reflect.ValueOf(circular), visited, parents, 0)
+	parents := lc.findParentComponents(circular)
 	if len(parents) != 0 {
 		t.Errorf("Expected no parents for circular dependency, got %d", len(parents))
 	}

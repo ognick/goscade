@@ -3,7 +3,7 @@
 .DEFAULT_GOAL := test
 
 test:
-	go test --count=1  -bench=. -v ./...
+	go test --count=5 -race -bench=. -v ./...
 
 lint:
 	@golangci-lint run --fix --verbose
