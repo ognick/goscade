@@ -3,12 +3,12 @@ package goscade
 // Queue defines a generic queue interface for managing items of type T.
 // It provides basic operations for adding, removing, and checking the queue state.
 type Queue[T any] interface {
-	// Enqueue adds an item to the queue.
-	Enqueue(item T)
+	// Push adds an item to the queue.
+	Push(item T)
 
-	// Dequeue removes and returns an item from the queue.
+	// Pop removes and returns an item from the queue.
 	// Returns the item and true if successful, or zero value and false if empty.
-	Dequeue() (T, bool)
+	Pop() (T, bool)
 
 	// IsEmpty returns true if the queue contains no items.
 	IsEmpty() bool
@@ -20,14 +20,14 @@ type FIFOQueue[T any] struct {
 	items []T
 }
 
-// Enqueue adds an item to the end of the FIFO queue.
-func (q *FIFOQueue[T]) Enqueue(item T) {
+// Push adds an item to the end of the FIFO queue.
+func (q *FIFOQueue[T]) Push(item T) {
 	q.items = append(q.items, item)
 }
 
-// Dequeue removes and returns the first item from the FIFO queue.
+// Pop removes and returns the first item from the FIFO queue.
 // Returns the item and true if successful, or zero value and false if empty.
-func (q *FIFOQueue[T]) Dequeue() (T, bool) {
+func (q *FIFOQueue[T]) Pop() (T, bool) {
 	if q.IsEmpty() {
 		var zero T
 		return zero, false
@@ -48,14 +48,14 @@ type LIFOQueue[T any] struct {
 	items []T
 }
 
-// Enqueue adds an item to the end of the LIFO queue.
-func (q *LIFOQueue[T]) Enqueue(item T) {
+// Push adds an item to the end of the LIFO queue.
+func (q *LIFOQueue[T]) Push(item T) {
 	q.items = append(q.items, item)
 }
 
-// Dequeue removes and returns the last item from the LIFO queue.
+// Pop removes and returns the last item from the LIFO queue.
 // Returns the item and true if successful, or zero value and false if empty.
-func (q *LIFOQueue[T]) Dequeue() (T, bool) {
+func (q *LIFOQueue[T]) Pop() (T, bool) {
 	if q.IsEmpty() {
 		var zero T
 		return zero, false
