@@ -55,18 +55,14 @@ type mockLogger struct{}
 func (m *mockLogger) Infof(format string, args ...interface{})  {}
 func (m *mockLogger) Errorf(format string, args ...interface{}) {}
 
-// setupTestLifecycle creates a new lifecycle for testing
-func setupTestLifecycle() *lifecycle {
-	return &lifecycle{
-		components: make(map[Component]struct{}),
-		ptrToComp:  make(map[uintptr]Component),
-		log:        &mockLogger{},
-	}
+// newTestLifecycle creates a new lifecycle for testing
+func newTestLifecycle() *lifecycle {
+	return NewLifecycle(&mockLogger{}).(*lifecycle)
 }
 
 // TestFindParentComponents_Empty tests findParentComponents with empty values
 func TestFindParentComponents_Empty(t *testing.T) {
-	lc := setupTestLifecycle()
+	lc := newTestLifecycle()
 	parents := lc.findParentComponents(nil)
 	if len(parents) != 0 {
 		t.Errorf("Expected empty parents map, got %d elements", len(parents))
@@ -75,7 +71,7 @@ func TestFindParentComponents_Empty(t *testing.T) {
 
 // TestFindParentComponents_Interface tests findParentComponents with interfaces
 func TestFindParentComponents_Interface(t *testing.T) {
-	lc := setupTestLifecycle()
+	lc := newTestLifecycle()
 
 	comp := &mockComponent{name: "test"}
 	parents := lc.findParentComponents(comp)
@@ -86,7 +82,7 @@ func TestFindParentComponents_Interface(t *testing.T) {
 
 // TestFindParentComponents_Pointer tests findParentComponents with pointers
 func TestFindParentComponents_Pointer(t *testing.T) {
-	lc := setupTestLifecycle()
+	lc := newTestLifecycle()
 
 	comp := &mockComponent{name: "test"}
 	lc.ptrToComp[reflect.ValueOf(comp).Pointer()] = comp
@@ -99,7 +95,7 @@ func TestFindParentComponents_Pointer(t *testing.T) {
 
 // TestFindParentComponents_Struct tests findParentComponents with structs
 func TestFindParentComponents_Struct(t *testing.T) {
-	lc := setupTestLifecycle()
+	lc := newTestLifecycle()
 
 	comp := &mockComponent{name: "test"}
 	lc.ptrToComp[reflect.ValueOf(comp).Pointer()] = comp
@@ -113,7 +109,7 @@ func TestFindParentComponents_Struct(t *testing.T) {
 
 // TestDependencies_Empty tests Dependencies with empty component set
 func TestDependencies_Empty(t *testing.T) {
-	lc := setupTestLifecycle()
+	lc := newTestLifecycle()
 	deps := lc.Dependencies()
 	if len(deps) != 0 {
 		t.Errorf("Expected empty dependencies, got %d elements", len(deps))
@@ -122,7 +118,7 @@ func TestDependencies_Empty(t *testing.T) {
 
 // TestDependencies_NoDeps tests Dependencies with components without dependencies
 func TestDependencies_NoDeps(t *testing.T) {
-	lc := setupTestLifecycle()
+	lc := newTestLifecycle()
 	comp := &mockComponent{name: "test"}
 	lc.Register(comp)
 
@@ -137,7 +133,7 @@ func TestDependencies_NoDeps(t *testing.T) {
 
 // TestBuildCompToParents_Empty tests buildCompToParents with empty component set
 func TestBuildCompToParents_Empty(t *testing.T) {
-	lc := setupTestLifecycle()
+	lc := newTestLifecycle()
 	parents := lc.buildCompToParents()
 	if len(parents) != 0 {
 		t.Errorf("Expected empty parents map, got %d elements", len(parents))
@@ -146,7 +142,7 @@ func TestBuildCompToParents_Empty(t *testing.T) {
 
 // TestBuildCompToChildren_Empty tests buildCompToChildren with empty parent graph
 func TestBuildCompToChildren_Empty(t *testing.T) {
-	lc := setupTestLifecycle()
+	lc := newTestLifecycle()
 	children := lc.buildCompToChildren(make(map[Component]map[Component]struct{}))
 	if len(children) != 0 {
 		t.Errorf("Expected empty children map, got %d elements", len(children))
@@ -160,7 +156,7 @@ type sliceMockComponent struct {
 
 // TestFindParentComponents_Slice tests findParentComponents with slices
 func TestFindParentComponents_Slice(t *testing.T) {
-	lc := setupTestLifecycle()
+	lc := newTestLifecycle()
 
 	comp := &mockComponent{name: "test"}
 	lc.ptrToComp[reflect.ValueOf(comp).Pointer()] = comp
@@ -179,7 +175,7 @@ type arrayMockComponent struct {
 
 // TestFindParentComponents_Array tests findParentComponents with arrays
 func TestFindParentComponents_Array(t *testing.T) {
-	lc := setupTestLifecycle()
+	lc := newTestLifecycle()
 
 	comp := &mockComponent{name: "test"}
 	lc.ptrToComp[reflect.ValueOf(comp).Pointer()] = comp
@@ -198,7 +194,7 @@ type mapMockComponent struct {
 
 // TestFindParentComponents_Map tests findParentComponents with maps
 func TestFindParentComponents_Map(t *testing.T) {
-	lc := setupTestLifecycle()
+	lc := newTestLifecycle()
 
 	comp := &mockComponent{name: "test"}
 	lc.ptrToComp[reflect.ValueOf(comp).Pointer()] = comp
@@ -212,7 +208,7 @@ func TestFindParentComponents_Map(t *testing.T) {
 
 // TestFindParentComponents_NestedStruct tests findParentComponents with nested structs
 func TestFindParentComponents_NestedStruct(t *testing.T) {
-	lc := setupTestLifecycle()
+	lc := newTestLifecycle()
 
 	comp := &mockComponent{name: "test"}
 	lc.ptrToComp[reflect.ValueOf(comp).Pointer()] = comp
@@ -238,7 +234,7 @@ func TestFindParentComponents_NestedStruct(t *testing.T) {
 
 // TestFindParentComponents_MultipleDeps tests findParentComponents with multiple dependencies
 func TestFindParentComponents_MultipleDeps(t *testing.T) {
-	lc := setupTestLifecycle()
+	lc := newTestLifecycle()
 
 	comp1 := &mockComponent{name: "test1"}
 	comp2 := &mockComponent{name: "test2"}
@@ -254,7 +250,7 @@ func TestFindParentComponents_MultipleDeps(t *testing.T) {
 
 // TestDependencies_WithDeps tests Dependencies with components that have dependencies
 func TestDependencies_WithDeps(t *testing.T) {
-	lc := setupTestLifecycle()
+	lc := newTestLifecycle()
 	comp1 := &mockComponent{name: "test1"}
 	comp2 := &mockComponent{name: "test2"}
 	lc.Register(comp1)
@@ -273,7 +269,7 @@ func TestDependencies_WithDeps(t *testing.T) {
 
 // TestBuildCompToParents_WithDeps tests buildCompToParents with components that have dependencies
 func TestBuildCompToParents_WithDeps(t *testing.T) {
-	lc := setupTestLifecycle()
+	lc := newTestLifecycle()
 	comp1 := &mockComponent{name: "test1"}
 	comp2 := &mockComponent{name: "test2"}
 	lc.Register(comp1)
@@ -292,7 +288,7 @@ func TestBuildCompToParents_WithDeps(t *testing.T) {
 
 // TestBuildCompToChildren_WithDeps tests buildCompToChildren with components that have dependencies
 func TestBuildCompToChildren_WithDeps(t *testing.T) {
-	lc := setupTestLifecycle()
+	lc := newTestLifecycle()
 	comp1 := &mockComponent{name: "test1"}
 	comp2 := &mockComponent{name: "test2"}
 	lc.Register(comp1)
@@ -312,7 +308,7 @@ func TestBuildCompToChildren_WithDeps(t *testing.T) {
 
 // TestFindParentComponents_CircularDeps tests findParentComponents with circular dependencies
 func TestFindParentComponents_CircularDeps(t *testing.T) {
-	lc := setupTestLifecycle()
+	lc := newTestLifecycle()
 
 	type CircularStruct struct {
 		mockComponent
@@ -330,7 +326,7 @@ func TestFindParentComponents_CircularDeps(t *testing.T) {
 
 // TestDependencies_ComplexGraph tests Dependencies with a complex dependency graph
 func TestDependencies_ComplexGraph(t *testing.T) {
-	lc := setupTestLifecycle()
+	lc := newTestLifecycle()
 	// Create components
 	comp1 := &mockComponent{name: "test1"}
 	comp2 := &mockComponent{name: "test2"}
@@ -359,7 +355,7 @@ func TestDependencies_ComplexGraph(t *testing.T) {
 
 // TestBuildCompToParents_CycleGraph tests cycle graph in buildCompToParents
 func TestBuildCompToParents_CycleGraph(t *testing.T) {
-	lc := setupTestLifecycle()
+	lc := newTestLifecycle()
 	comp1 := Register(lc, &mockComponent{name: "test1"})
 	comp2 := Register(lc, &mockComponent{name: "test2"})
 	rec1 := Register(lc, &RecStruct{Name: "rec1", Comp: comp1})

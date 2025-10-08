@@ -68,7 +68,9 @@ type Lifecycle interface {
 
 	// Register adds a component to the lifecycle manager.
 	// The component must be a pointer or interface type.
-	Register(component Component)
+	// Optional implicitDeps allows explicit dependency declaration when automatic
+	// detection is not sufficient (e.g., interface dependencies, function parameters).
+	Register(component Component, implicitDeps ...Component)
 
 	// Run starts all registered components and returns a function that can be
 	// called to wait for graceful shutdown. The readinessProbe callback is
@@ -84,12 +86,13 @@ type Lifecycle interface {
 
 // lifecycle is the internal implementation of the Lifecycle interface.
 type lifecycle struct {
-	mu             sync.RWMutex
-	status         LifecycleStatus
-	statusListener chan LifecycleStatus
-	components     map[Component]struct{}
-	ptrToComp      map[uintptr]Component
-	log            logger
+	mu                 sync.RWMutex
+	status             LifecycleStatus
+	statusListener     chan LifecycleStatus
+	compToImplicitDeps map[Component]map[Component]struct{}
+	components         map[Component]struct{}
+	ptrToComp          map[uintptr]Component
+	log                logger
 
 	ignoreCircularDependency bool
 	startTimeout             time.Duration
@@ -121,12 +124,13 @@ func WithStartTimeout(timeout time.Duration) Option {
 // and graceful shutdown of all registered components.
 func NewLifecycle(log logger, opts ...Option) Lifecycle {
 	lc := &lifecycle{
-		log:            log,
-		status:         LifecycleStatusIdle,
-		statusListener: make(chan LifecycleStatus),
-		components:     make(map[Component]struct{}),
-		ptrToComp:      make(map[uintptr]Component),
-		startTimeout:   time.Minute, // Default 1 minute
+		log:                log,
+		status:             LifecycleStatusIdle,
+		compToImplicitDeps: make(map[Component]map[Component]struct{}),
+		statusListener:     make(chan LifecycleStatus),
+		components:         make(map[Component]struct{}),
+		ptrToComp:          make(map[uintptr]Component),
+		startTimeout:       time.Minute, // Default 1 minute
 	}
 
 	for _, opt := range opts {
@@ -139,14 +143,24 @@ func NewLifecycle(log logger, opts ...Option) Lifecycle {
 // Register adds a component to the lifecycle manager.
 // The component must be a pointer type for proper dependency detection.
 // This method will panic if a non-pointer component is registered.
-func (lc *lifecycle) Register(comp Component) {
-	val := reflect.ValueOf(comp)
-	if val.Kind() != reflect.Pointer {
-		panic(fmt.Sprintf("component must be a pointer, got %s", val.Kind()))
+// Optional implicitDeps allows explicit dependency declaration when automatic
+// detection is not sufficient (e.g., interface dependencies, function parameters).
+func (lc *lifecycle) Register(comp Component, implicitDeps ...Component) {
+	if _, ok := lc.components[comp]; !ok {
+		val := reflect.ValueOf(comp)
+		if val.Kind() != reflect.Pointer {
+			panic(fmt.Sprintf("component must be a pointer, got %s", val.Kind()))
+		}
+
+		lc.components[comp] = struct{}{}
+		lc.ptrToComp[val.Pointer()] = comp
+		lc.compToImplicitDeps[comp] = make(map[Component]struct{})
 	}
 
-	lc.components[comp] = struct{}{}
-	lc.ptrToComp[val.Pointer()] = comp
+	for _, dep := range implicitDeps {
+		lc.Register(dep)
+		lc.compToImplicitDeps[comp][dep] = struct{}{}
+	}
 }
 
 // setStatus updates the lifecycle status with proper state transition validation.
@@ -263,6 +277,7 @@ func (lc *lifecycle) runComponent(
 	runner.Go(func() (runErr error) {
 		defer state.cancelTeardown(runErr)
 		<-startLatch
+
 		err := <-waitAllParentProbes
 		if err != nil && !errors.Is(err, context.Canceled) {
 			state.cancelProbe(err)

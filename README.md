@@ -10,6 +10,7 @@ goscade is a thin wrapper at the application's top level that doesn't penetrate 
 ## Features
 
 - **Automatic dependency detection** - No manual dependency declaration needed
+- **Explicit dependency declaration** - Support for implicit dependencies when automatic detection is not sufficient
 - **Concurrent execution** - Components run in parallel when possible
 - **Graceful shutdown** - Proper cleanup with dependency awareness
 - **Health checks** - Built-in readiness probe system
@@ -100,6 +101,21 @@ db := goscade.Register(lc, NewDatabase(config))
 cache := goscade.Register(lc, NewCache(db))
 ```
 
+### Explicit Dependencies
+When automatic dependency detection is not sufficient, you can explicitly declare dependencies:
+
+```go
+// Register components with explicit dependencies
+db := goscade.Register(lc, NewDatabase(config))
+cache := goscade.Register(lc, NewCache(), db) // cache depends on db
+service := goscade.Register(lc, NewService(), db, cache) // service depends on both db and cache
+```
+
+This is useful when:
+- Dependencies are injected through interfaces
+- Dependencies are passed as function parameters
+- You need to ensure specific startup order
+
 ### Circular Dependency Support
 Optional support for circular dependencies:
 
@@ -140,7 +156,8 @@ parentLC.Register(&APIServer{})
 
 ### Core Features
 - Component lifecycle management (idle → running → ready → stopping → stopped)
-- Automatic dependency graph building
+- Automatic dependency graph building through reflection
+- Explicit dependency declaration for complex scenarios
 - Topological sorting and component startup
 - Readiness signaling via `readinessProbe`
 - Graceful shutdown on context cancellation
@@ -152,6 +169,7 @@ parentLC.Register(&APIServer{})
 - Circular dependencies are disabled by default (can be enabled with `WithCircularDependency()`)
 - No built-in support for optional dependencies
 - Graph is built using reflection on startup, which introduces overhead proportional to the number and complexity of components
+- Explicit dependencies must be registered before the component that depends on them
 
 ## License
 

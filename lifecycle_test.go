@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,25 +24,13 @@ func (m *mockComponentCyclic) Run(ctx context.Context, readinessProbe func(error
 	return nil
 }
 
-// CyclicStruct is used to create a cyclic dependency via the Dep field in tests.
-// It implements the Component interface.
-type CyclicStruct struct {
-	Dep Component
-}
-
-func (c *CyclicStruct) Run(ctx context.Context, readinessProbe func(error)) error {
-	readinessProbe(nil)
-	<-ctx.Done()
-	return nil
-}
-
 func runLifecycle(ctx context.Context, lc Lifecycle) error {
-	sync := make(chan struct{})
+	ready := make(chan struct{})
 	lc.Run(ctx, func(err error) {
-		close(sync)
+		close(ready)
 	})
 	select {
-	case <-sync:
+	case <-ready:
 		return nil
 	case <-time.After(1 * time.Second):
 		return context.DeadlineExceeded
@@ -107,6 +96,146 @@ func TestLifecycle_Register_Pointer(t *testing.T) {
 		}
 	}()
 	lc.Register(comp)
+}
+
+// Test: Register with implicit dependencies
+func TestLifecycle_Register_WithImplicitDeps(t *testing.T) {
+	lc := NewLifecycle(&mockLogger{})
+	dep1 := &mockComponentCyclic{}
+	dep2 := &mockComponentCyclic{}
+	comp := &mockComponentCyclic{}
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("unexpected panic: %v", r)
+		}
+	}()
+
+	// Register component with implicit dependencies
+	lc.Register(comp, dep1, dep2)
+
+	// Check that all components are registered
+	deps := lc.Dependencies()
+	if len(deps) != 3 {
+		t.Errorf("expected 3 components, got %d", len(deps))
+	}
+
+	// Check that the component has the correct dependencies
+	compDeps := deps[comp]
+	if len(compDeps) != 2 {
+		t.Errorf("expected 2 dependencies for main component, got %d", len(compDeps))
+	}
+
+	// Check that both dependencies are present
+	hasDep1, hasDep2 := false, false
+	for _, dep := range compDeps {
+		if dep == dep1 {
+			hasDep1 = true
+		}
+		if dep == dep2 {
+			hasDep2 = true
+		}
+	}
+	if !hasDep1 {
+		t.Error("component should have dependency 1")
+	}
+	if !hasDep2 {
+		t.Error("component should have dependency 2")
+	}
+}
+
+// Test: Register with no implicit dependencies (backward compatibility)
+func TestLifecycle_Register_NoImplicitDeps(t *testing.T) {
+	lc := NewLifecycle(&mockLogger{})
+	comp := &mockComponentCyclic{}
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("unexpected panic: %v", r)
+		}
+	}()
+
+	// Register component without implicit dependencies
+	lc.Register(comp)
+
+	// Check that component is registered
+	deps := lc.Dependencies()
+	if len(deps) != 1 {
+		t.Errorf("expected 1 component, got %d", len(deps))
+	}
+
+	// Check that component has no dependencies
+	compDeps := deps[comp]
+	if len(compDeps) != 0 {
+		t.Errorf("expected 0 dependencies, got %d", len(compDeps))
+	}
+}
+
+// Test: Register with duplicate implicit dependencies
+func TestLifecycle_Register_DuplicateImplicitDeps(t *testing.T) {
+	lc := NewLifecycle(&mockLogger{})
+	dep := &mockComponentCyclic{}
+	comp := &mockComponentCyclic{}
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("unexpected panic: %v", r)
+		}
+	}()
+
+	// Register component with duplicate implicit dependencies
+	lc.Register(comp, dep, dep)
+
+	// Check dependencies
+	deps := lc.Dependencies()
+	if len(deps) != 2 {
+		t.Errorf("expected 2 components, got %d", len(deps))
+	}
+
+	// Check that the component has only one dependency (duplicates should be deduplicated)
+	compDeps := deps[comp]
+	if len(compDeps) != 1 {
+		t.Errorf("expected 1 dependency for main component (duplicates deduplicated), got %d", len(compDeps))
+	}
+
+	if compDeps[0] != dep {
+		t.Error("component should have the correct dependency")
+	}
+}
+
+// Test: Register component twice (should not duplicate)
+func TestLifecycle_Register_DuplicateComponent(t *testing.T) {
+	lc := NewLifecycle(&mockLogger{})
+	comp := &mockComponentCyclic{}
+	dep := &mockComponentCyclic{}
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("unexpected panic: %v", r)
+		}
+	}()
+
+	// Register component first time
+	lc.Register(comp)
+
+	// Register same component again with implicit dependency
+	lc.Register(comp, dep)
+
+	// Check that only one instance of component exists
+	deps := lc.Dependencies()
+	if len(deps) != 2 {
+		t.Errorf("expected 2 components, got %d", len(deps))
+	}
+
+	// Check that component has the implicit dependency
+	compDeps := deps[comp]
+	if len(compDeps) != 1 {
+		t.Errorf("expected 1 dependency for main component, got %d", len(compDeps))
+	}
+
+	if compDeps[0] != dep {
+		t.Error("component should have the correct dependency")
+	}
 }
 
 // Test: Dependencies with a single component without dependencies
@@ -226,7 +355,7 @@ func TestLifecycle_Run_GracefulShutdown(t *testing.T) {
 // Test: Component error handling
 type errorComponent struct{}
 
-func (e *errorComponent) Run(ctx context.Context, readinessProbe func(error)) error {
+func (e *errorComponent) Run(_ context.Context, readinessProbe func(error)) error {
 	readinessProbe(nil)
 	return errors.New("component error")
 }
@@ -379,7 +508,7 @@ func TestRunComponent_ParentDependencyFailure(t *testing.T) {
 // cascadeComponent causes cascade shutdown for testing
 type cascadeComponent struct{}
 
-func (c *cascadeComponent) Run(ctx context.Context, readinessProbe func(error)) error {
+func (c *cascadeComponent) Run(_ context.Context, readinessProbe func(error)) error {
 	readinessProbe(nil)
 	// Return an error to trigger cascade shutdown
 	return errors.New("component error")
@@ -448,7 +577,7 @@ func TestRunComponent_ProbeError(t *testing.T) {
 // unexpectedCloseComponent closes without error for testing
 type unexpectedCloseComponent struct{}
 
-func (c *unexpectedCloseComponent) Run(ctx context.Context, readinessProbe func(error)) error {
+func (c *unexpectedCloseComponent) Run(_ context.Context, readinessProbe func(error)) error {
 	readinessProbe(nil)
 	// Return nil without waiting for context cancellation
 	return nil
@@ -620,6 +749,82 @@ func TestLifecycle_NestedLifecycleWithDependencies(t *testing.T) {
 
 	// Verify parent lifecycle is ready
 	assert.Equal(t, LifecycleStatusReady, parentLC.Status())
+	cancel()
+
+	// Wait for graceful shutdown
+	shutdownErr := waitGracefulShutdown()
+	assert.ErrorIs(t, shutdownErr, context.Canceled)
+}
+
+type startupOrder struct {
+	items []string
+	mu    sync.Mutex
+}
+
+func (c *startupOrder) add(name string) {
+	c.mu.Lock()
+	c.items = append(c.items, name)
+	c.mu.Unlock()
+}
+
+// orderTrackingComponent tracks the order of component startup
+type orderTrackingComponent struct {
+	order *startupOrder
+	name  string
+}
+
+func (c *orderTrackingComponent) Run(ctx context.Context, readinessProbe func(error)) error {
+	c.order.add(c.name)
+	readinessProbe(nil)
+	<-ctx.Done()
+	return nil
+}
+
+// Test: Component startup order with implicit dependencies
+func TestLifecycle_ImplicitDeps_StartupOrder(t *testing.T) {
+	lc := NewLifecycle(&mockLogger{})
+	order := &startupOrder{}
+
+	// Create components
+	dep1 := &orderTrackingComponent{name: "dep1", order: order}
+	dep2 := &orderTrackingComponent{name: "dep2", order: order}
+	comp := &orderTrackingComponent{name: "comp", order: order}
+
+	// Register component with implicit dependencies
+	lc.Register(comp, dep1, dep2)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	readinessProbe := make(chan error)
+	waitGracefulShutdown := lc.Run(ctx, func(err error) {
+		readinessProbe <- err
+	})
+
+	// Wait for readiness probe
+	err := <-readinessProbe
+	assert.NoError(t, err)
+
+	// Check that dependencies started before the main component
+	assert.Len(t, order.items, 3, "All components should have started")
+
+	// Find positions of components in startup order
+	dep1Pos, dep2Pos, compPos := -1, -1, -1
+	for i, name := range order.items {
+		switch name {
+		case "dep1":
+			dep1Pos = i
+		case "dep2":
+			dep2Pos = i
+		case "comp":
+			compPos = i
+		}
+	}
+
+	// Dependencies should start before the main component
+	assert.True(t, dep1Pos < compPos, "dep1 should start before comp")
+	assert.True(t, dep2Pos < compPos, "dep2 should start before comp")
+
 	cancel()
 
 	// Wait for graceful shutdown

@@ -8,6 +8,7 @@ package goscade
 //
 //	server := Register(lc, NewServer(handler))
 //	db := Register(lc, NewDatabase(config))
+//	cache := Register(lc, NewCache(), db) // explicit dependency
 //
 // This is equivalent to:
 //
@@ -15,7 +16,9 @@ package goscade
 //	lc.Register(server)
 //	db := NewDatabase(config)
 //	lc.Register(db)
-func Register[T Component](lc Lifecycle, component T) T {
-	lc.Register(component)
+//	cache := NewCache()
+//	lc.Register(cache, db) // explicit dependency
+func Register[T Component](lc Lifecycle, component T, implicitDeps ...Component) T {
+	lc.Register(component, implicitDeps...)
 	return component
 }
