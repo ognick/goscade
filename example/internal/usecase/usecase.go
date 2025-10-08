@@ -44,7 +44,7 @@ func newGraph(log logger) *graph {
 	bookRepo := goscade.Register(lc, components.NewBookRepo(observer, cache, listener))
 	userRepo := goscade.Register(lc, components.NewUserRepo(observer, postgres))
 	// apis
-	bookAPI := goscade.Register(lc, components.NewBookAPI(observer, web))
+	bookAPI := goscade.Register(lc, components.NewBookAPI(observer, web), cache)
 	userAPI := goscade.Register(lc, components.NewUserAPI(observer, listener))
 	// services
 	bookSrv := goscade.Register(lc, components.NewBookService(observer, bookAPI, bookRepo))

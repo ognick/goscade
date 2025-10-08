@@ -16,12 +16,14 @@ import (
 // Returns:
 //   - parents: map to collect found parent components
 func (lc *lifecycle) findParentComponents(root Component) map[Component]struct{} {
-	parents := make(map[Component]struct{})
-
-	queue := FIFOQueue[reflect.Value]{}
 	visited := make(map[uintptr]struct{})
-
+	queue := FIFOQueue[reflect.Value]{}
 	queue.Push(reflect.ValueOf(root))
+	parents := make(map[Component]struct{})
+	for dep := range lc.compToImplicitDeps[root] {
+		parents[dep] = struct{}{}
+	}
+
 	var initialized bool
 	for !queue.IsEmpty() {
 		val, _ := queue.Pop()
