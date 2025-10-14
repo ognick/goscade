@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"golang.org/x/sync/errgroup"
 )
 
 // mockComponentCyclic is used to create a cyclic dependency in tests.
@@ -24,14 +25,17 @@ func (m *mockComponentCyclic) Run(ctx context.Context, readinessProbe func(error
 	return nil
 }
 
-func runLifecycle(ctx context.Context, lc Lifecycle) error {
-	ready := make(chan struct{})
-	lc.Run(ctx, func(err error) {
-		close(ready)
-	})
+func runLifecycle(ctx context.Context, lc Lifecycle, catch func()) error {
+	ready := make(chan error)
+	go func() {
+		defer catch()
+		_ = lc.Run(ctx, func(err error) {
+			ready <- err
+		})
+	}()
 	select {
-	case <-ready:
-		return nil
+	case err := <-ready:
+		return err
 	case <-time.After(1 * time.Second):
 		return context.DeadlineExceeded
 	}
@@ -65,7 +69,7 @@ func TestLifecycle_Run_CircularDependency(t *testing.T) {
 			lc.Register(compA)
 			lc.Register(compB)
 
-			defer func() {
+			catch := func() {
 				rec := recover()
 				if tt.expectPanic {
 					if rec == nil {
@@ -80,8 +84,9 @@ func TestLifecycle_Run_CircularDependency(t *testing.T) {
 						t.Fatalf("did not expect panic, but got: %v", rec)
 					}
 				}
-			}()
-			assert.NoError(t, runLifecycle(context.Background(), lc))
+			}
+
+			_ = runLifecycle(context.Background(), lc, catch)
 		})
 	}
 }
@@ -289,13 +294,12 @@ func TestLifecycle_BuildCompToParents_And_Children(t *testing.T) {
 // Test: Run with no components
 func TestLifecycle_NoComponents(t *testing.T) {
 	lc := NewLifecycle(&mockLogger{})
-	defer func() {
+	catch := func() {
 		if r := recover(); r != nil {
 			t.Fatalf("unexpected panic: %v", r)
 		}
-	}()
-
-	assert.NoError(t, runLifecycle(context.Background(), lc))
+	}
+	assert.NoError(t, runLifecycle(context.Background(), lc, catch))
 }
 
 // Test: Correct status transitions
@@ -335,7 +339,7 @@ func TestLifecycle_Run_GracefulShutdown(t *testing.T) {
 
 	// Start components
 	go func() {
-		assert.NoError(t, runLifecycle(cancelCtx, lc))
+		assert.NoError(t, runLifecycle(cancelCtx, lc, func() {}))
 	}()
 
 	// Wait until status becomes Ready
@@ -356,7 +360,7 @@ func TestLifecycle_Run_GracefulShutdown(t *testing.T) {
 type errorComponent struct{}
 
 func (e *errorComponent) Run(_ context.Context, readinessProbe func(error)) error {
-	readinessProbe(nil)
+	readinessProbe(errors.New("component error"))
 	return errors.New("component error")
 }
 
@@ -365,17 +369,20 @@ func TestLifecycle_Run_ComponentError(t *testing.T) {
 	lc := NewLifecycle(&mockLogger{})
 	comp := &errorComponent{}
 	lc.Register(comp)
-	lcImpl := lc.(*lifecycle)
-	lcImpl.ptrToComp[reflect.ValueOf(comp).Pointer()] = comp
 
 	// Start components
-	go func() {
-		assert.NoError(t, runLifecycle(context.Background(), lc))
-	}()
+	_ = runLifecycle(context.Background(), lc, func() {})
 
 	// Wait until status becomes Stopped
-	for lc.Status() != LifecycleStatusStopped {
-		time.Sleep(10 * time.Millisecond)
+	for {
+		if lc.Status() == LifecycleStatusStopped {
+			return
+		}
+		select {
+		case <-time.After(10 * time.Millisecond):
+		case <-time.After(1 * time.Second):
+			t.Fatal("lifecycle did not stop after component error")
+		}
 	}
 }
 
@@ -398,15 +405,18 @@ func TestNewAdapter_Run(t *testing.T) {
 	lc.Register(adapter)
 
 	readinessProbe := make(chan error)
-	waitGracefulShutdown := lc.Run(ctx, func(err error) {
-		readinessProbe <- err
+	errGroup := &errgroup.Group{}
+	errGroup.Go(func() error {
+		return lc.Run(ctx, func(err error) {
+			readinessProbe <- err
+		})
 	})
 
 	assert.NoError(t, <-readinessProbe)
 	assert.True(t, probeCalled, "Readiness probe should have been called")
 
 	cancel()
-	assert.EqualError(t, waitGracefulShutdown(), "context canceled")
+	assert.EqualError(t, errGroup.Wait(), "context canceled")
 }
 
 // Test: adapter delegateName returns correct type string
@@ -469,14 +479,17 @@ func TestRunComponent_DelegateNameProvider(t *testing.T) {
 	defer cancel()
 
 	readinessProbe := make(chan error)
-	waitGracefulShutdown := lc.Run(ctx, func(err error) {
-		readinessProbe <- err
+	errGroup := &errgroup.Group{}
+	errGroup.Go(func() error {
+		return lc.Run(ctx, func(err error) {
+			readinessProbe <- err
+		})
 	})
 
 	assert.NoError(t, <-readinessProbe)
 
 	// Wait for graceful shutdown
-	err := waitGracefulShutdown()
+	err := errGroup.Wait()
 	assert.Error(t, err) // Should be context deadline exceeded or canceled
 }
 
@@ -495,13 +508,16 @@ func TestRunComponent_ParentDependencyFailure(t *testing.T) {
 	defer cancel()
 
 	readinessProbe := make(chan error)
-	waitGracefulShutdown := lc.Run(ctx, func(err error) {
-		readinessProbe <- err
+	errGroup := &errgroup.Group{}
+	errGroup.Go(func() error {
+		return lc.Run(ctx, func(err error) {
+			readinessProbe <- err
+		})
 	})
 
 	<-readinessProbe
 	// Wait for graceful shutdown
-	shutdownErr := waitGracefulShutdown()
+	shutdownErr := errGroup.Wait()
 	assert.EqualError(t, shutdownErr, "component error")
 }
 
@@ -525,8 +541,11 @@ func TestRunComponent_CascadeShutdown(t *testing.T) {
 	defer cancel()
 
 	readinessProbe := make(chan error)
-	waitGracefulShutdown := lc.Run(ctx, func(err error) {
-		readinessProbe <- err
+	errGroup := &errgroup.Group{}
+	errGroup.Go(func() error {
+		return lc.Run(ctx, func(err error) {
+			readinessProbe <- err
+		})
 	})
 
 	// Should get a response from readiness probe
@@ -535,7 +554,7 @@ func TestRunComponent_CascadeShutdown(t *testing.T) {
 	// So we just check that we get a response (could be nil or error)
 
 	// Wait for graceful shutdown
-	shutdownErr := waitGracefulShutdown()
+	shutdownErr := errGroup.Wait()
 	assert.Error(t, shutdownErr)
 }
 
@@ -560,17 +579,19 @@ func TestRunComponent_ProbeError(t *testing.T) {
 	defer cancel()
 
 	readinessProbe := make(chan error)
-	waitGracefulShutdown := lc.Run(ctx, func(err error) {
-		readinessProbe <- err
+	errGroup := &errgroup.Group{}
+	errGroup.Go(func() error {
+		return lc.Run(ctx, func(err error) {
+			readinessProbe <- err
+		})
 	})
-
 	// Should get an error due to probe failure
 	err := <-readinessProbe
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "probe error")
 
 	// Wait for graceful shutdown
-	shutdownErr := waitGracefulShutdown()
+	shutdownErr := errGroup.Wait()
 	assert.Error(t, shutdownErr)
 }
 
@@ -594,8 +615,11 @@ func TestRunComponent_UnexpectedClose(t *testing.T) {
 	defer cancel()
 
 	readinessProbe := make(chan error)
-	waitGracefulShutdown := lc.Run(ctx, func(err error) {
-		readinessProbe <- err
+	errGroup := &errgroup.Group{}
+	errGroup.Go(func() error {
+		return lc.Run(ctx, func(err error) {
+			readinessProbe <- err
+		})
 	})
 
 	// Should get a response from readiness probe
@@ -604,7 +628,7 @@ func TestRunComponent_UnexpectedClose(t *testing.T) {
 	// So we just check that we get a response (could be nil or error)
 
 	// Wait for graceful shutdown
-	shutdownErr := waitGracefulShutdown()
+	shutdownErr := errGroup.Wait()
 	assert.Error(t, shutdownErr)
 }
 
@@ -633,8 +657,11 @@ func TestTimeout_StartTimeout(t *testing.T) {
 	defer cancel()
 
 	readinessProbe := make(chan error)
-	waitGracefulShutdown := lc.Run(ctx, func(err error) {
-		readinessProbe <- err
+	errGroup := &errgroup.Group{}
+	errGroup.Go(func() error {
+		return lc.Run(ctx, func(err error) {
+			readinessProbe <- err
+		})
 	})
 
 	// Should get timeout error
@@ -642,7 +669,7 @@ func TestTimeout_StartTimeout(t *testing.T) {
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
 
 	// Wait for graceful shutdown
-	shutdownErr := waitGracefulShutdown()
+	shutdownErr := errGroup.Wait()
 	assert.ErrorIs(t, shutdownErr, context.Canceled)
 }
 
@@ -656,8 +683,11 @@ func TestTimeout_DefaultTimeouts(t *testing.T) {
 	lc.Register(comp)
 
 	readinessProbe := make(chan error)
-	waitGracefulShutdown := lc.Run(ctx, func(err error) {
-		readinessProbe <- err
+	errGroup := &errgroup.Group{}
+	errGroup.Go(func() error {
+		return lc.Run(ctx, func(err error) {
+			readinessProbe <- err
+		})
 	})
 
 	// Should succeed with default timeout (1 minute)
@@ -667,7 +697,7 @@ func TestTimeout_DefaultTimeouts(t *testing.T) {
 	cancel()
 
 	// Wait for graceful shutdown
-	shutdownErr := waitGracefulShutdown()
+	shutdownErr := errGroup.Wait()
 	assert.ErrorIs(t, shutdownErr, context.Canceled)
 }
 
@@ -684,7 +714,7 @@ func TestLifecycle_AsComponent(t *testing.T) {
 	childLC.Register(&mockComponentCyclic{})
 
 	// Wrap child lifecycle as a component
-	parentLC.Register(childLC.AsComponent())
+	parentLC.Register(childLC)
 
 	// Add another component to parent lifecycle
 	parentComp := &mockComponentCyclic{}
@@ -693,8 +723,11 @@ func TestLifecycle_AsComponent(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 
 	readinessProbe := make(chan error)
-	waitGracefulShutdown := parentLC.Run(ctx, func(err error) {
-		readinessProbe <- err
+	errGroup := &errgroup.Group{}
+	errGroup.Go(func() error {
+		return parentLC.Run(ctx, func(err error) {
+			readinessProbe <- err
+		})
 	})
 
 	// Wait for readiness probe - should succeed
@@ -706,7 +739,7 @@ func TestLifecycle_AsComponent(t *testing.T) {
 	cancel()
 
 	// Wait for graceful shutdown
-	shutdownErr := waitGracefulShutdown()
+	shutdownErr := errGroup.Wait()
 	assert.ErrorIs(t, shutdownErr, context.Canceled)
 }
 
@@ -730,7 +763,7 @@ func TestLifecycle_NestedLifecycleWithDependencies(t *testing.T) {
 	childLC.Register(childService)
 
 	// Wrap child lifecycle as a component
-	parentLC.Register(childLC.AsComponent())
+	parentLC.Register(childLC)
 
 	// Add parent-level component
 	parentService := &mockComponentCyclic{}
@@ -739,8 +772,11 @@ func TestLifecycle_NestedLifecycleWithDependencies(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 
 	readinessProbe := make(chan error)
-	waitGracefulShutdown := parentLC.Run(ctx, func(err error) {
-		readinessProbe <- err
+	errGroup := &errgroup.Group{}
+	errGroup.Go(func() error {
+		return parentLC.Run(ctx, func(err error) {
+			readinessProbe <- err
+		})
 	})
 
 	// Wait for readiness probe - should succeed
@@ -752,7 +788,7 @@ func TestLifecycle_NestedLifecycleWithDependencies(t *testing.T) {
 	cancel()
 
 	// Wait for graceful shutdown
-	shutdownErr := waitGracefulShutdown()
+	shutdownErr := errGroup.Wait()
 	assert.ErrorIs(t, shutdownErr, context.Canceled)
 }
 
@@ -797,8 +833,11 @@ func TestLifecycle_ImplicitDeps_StartupOrder(t *testing.T) {
 	defer cancel()
 
 	readinessProbe := make(chan error)
-	waitGracefulShutdown := lc.Run(ctx, func(err error) {
-		readinessProbe <- err
+	errGroup := &errgroup.Group{}
+	errGroup.Go(func() error {
+		return lc.Run(ctx, func(err error) {
+			readinessProbe <- err
+		})
 	})
 
 	// Wait for readiness probe
@@ -828,6 +867,6 @@ func TestLifecycle_ImplicitDeps_StartupOrder(t *testing.T) {
 	cancel()
 
 	// Wait for graceful shutdown
-	shutdownErr := waitGracefulShutdown()
+	shutdownErr := errGroup.Wait()
 	assert.ErrorIs(t, shutdownErr, context.Canceled)
 }

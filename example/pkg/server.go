@@ -13,9 +13,9 @@ type HttpServer struct {
 	*http.Server
 }
 
-func NewServer(handler http.Handler) *HttpServer {
+func NewServer(addr string, handler http.Handler) *HttpServer {
 	return &HttpServer{Server: &http.Server{
-		Addr:    "127.0.0.1:8080",
+		Addr:    addr,
 		Handler: handler,
 	}}
 }

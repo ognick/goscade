@@ -72,16 +72,14 @@ type Lifecycle interface {
 	// detection is not sufficient (e.g., interface dependencies, function parameters).
 	Register(component Component, implicitDeps ...Component)
 
-	// Run starts all registered components and returns a function that can be
-	// called to wait for graceful shutdown. The readinessProbe callback is
-	// called when all components are ready or if there's an error during startup.
-	Run(ctx context.Context, readinessProbe func(err error)) func() error
+	// Run starts all registered components and blocks until shutdown.
+	// The method handles dependency resolution, concurrent startup, and graceful shutdown.
+	// The readinessProbe callback is called when all components are ready or if there's an error during startup.
+	// By default, the lifecycle will not respond to system signals unless WithShutdownHook() option is used.
+	Run(ctx context.Context, readinessProbe func(err error)) error
 
 	// Status returns the current status of the lifecycle manager.
 	Status() LifecycleStatus
-
-	// AsComponent wraps the lifecycle manager as a Component that can be registered with another lifecycle.
-	AsComponent() Component
 }
 
 // lifecycle is the internal implementation of the Lifecycle interface.
@@ -95,6 +93,7 @@ type lifecycle struct {
 	log                logger
 
 	ignoreCircularDependency bool
+	shutdownHook             bool
 	startTimeout             time.Duration
 }
 
@@ -108,6 +107,16 @@ type Option func(*lifecycle)
 func WithCircularDependency() Option {
 	return func(lc *lifecycle) {
 		lc.ignoreCircularDependency = true
+	}
+}
+
+// WithShutdownHook enables graceful shutdown on system signals (SIGINT, SIGTERM).
+// By default, lifecycles do not respond to system signals and only shut down
+// when the context is cancelled. This option enables signal handling for
+// graceful shutdown on system termination signals.
+func WithShutdownHook() Option {
+	return func(lc *lifecycle) {
+		lc.shutdownHook = true
 	}
 }
 
@@ -307,19 +316,24 @@ func (lc *lifecycle) runComponent(
 	})
 }
 
-// Run starts all registered components and returns a function that can be
-// called to wait for graceful shutdown. The method handles:
+// Run starts all registered components and blocks until shutdown.
+// The method handles:
 // - Dependency resolution and topological sorting
 // - Concurrent component startup
 // - Readiness probing and status management
-// - Graceful shutdown on context cancellation or signals
 // - Error propagation and cascade shutdown
+// - Graceful shutdown on context cancellation
 //
 // The readinessProbe callback is called when all components are ready
 // or if there's an error during startup.
-func (lc *lifecycle) Run(ctx context.Context, readinessProbe func(err error)) func() error {
-	gracefulCtx, _ := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
-	lifecycleCtx, lifecycleCtxCancel := context.WithCancelCause(gracefulCtx)
+// By default, the lifecycle will not respond to system signals unless
+// WithShutdownHook() option is used during lifecycle creation.
+func (lc *lifecycle) Run(ctx context.Context, readinessProbe func(err error)) error {
+	// Graceful shutdown on context cancellation or signal
+	if lc.shutdownHook {
+		ctx, _ = signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	}
+	lifecycleCtx, lifecycleCtxCancel := context.WithCancelCause(ctx)
 	compToParents := lc.buildCompToParents()
 	compToChildren := lc.buildCompToChildren(compToParents)
 	runner := &errgroup.Group{}
@@ -394,20 +408,7 @@ func (lc *lifecycle) Run(ctx context.Context, readinessProbe func(err error)) fu
 	lc.setStatus(ctx, LifecycleStatusRunning)
 	close(startLatch)
 
-	return func() error {
-		<-teardownCtx.Done()
-		lifecycleCtxCancel(context.Canceled)
-		return context.Cause(teardownCtx)
-	}
-}
-
-// AsComponent wraps the lifecycle manager as a Component that can be registered with another lifecycle.
-// This allows for nested lifecycle management where one lifecycle can be managed as a component
-// within another lifecycle.
-func (lc *lifecycle) AsComponent() Component {
-	return NewAdapter(lc, func(ctx context.Context, lc *lifecycle, readinessProbe func(cause error)) error {
-		stop := lc.Run(ctx, readinessProbe)
-		<-ctx.Done()
-		return stop()
-	})
+	<-teardownCtx.Done()
+	lifecycleCtxCancel(context.Canceled)
+	return context.Cause(teardownCtx)
 }
