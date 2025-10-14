@@ -12,6 +12,7 @@ import (
 	"github.com/ognick/goscade"
 	"github.com/ognick/goscade/example/internal/components"
 	"github.com/ognick/goscade/example/internal/domain"
+	"golang.org/x/sync/errgroup"
 )
 
 type logger interface {
@@ -123,13 +124,17 @@ func (u *Usecase) StartAll(_ context.Context, graphID string) error {
 		return fmt.Errorf("graph %s has status %s", graphID, status)
 	}
 
-	graph.waitGracefulShutdown = graph.lc.Run(graph.ctx, func(err error) {
-		if err != nil {
-			u.log.Errorf("Run graph:%s probe: %v", graphID, err)
-			return
-		}
-		u.log.Infof("Graph %s is ready", graphID)
+	errGroup := &errgroup.Group{}
+	errGroup.Go(func() error {
+		return graph.lc.Run(graph.ctx, func(err error) {
+			if err != nil {
+				u.log.Errorf("Run graph:%s probe: %v", graphID, err)
+				return
+			}
+			u.log.Infof("Graph %s is ready", graphID)
+		})
 	})
+	graph.waitGracefulShutdown = errGroup.Wait
 	return nil
 }
 

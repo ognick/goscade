@@ -41,24 +41,20 @@ import (
 func main() {
     // Create lifecycle manager
     log := logger.NewLogger()
-    lc := goscade.NewLifecycle(log)
+    lc := goscade.NewLifecycle(log, goscade.WithShutdownHook())
 
     // Register components
     lc.Register(&Database{})
     lc.Register(&Cache{})
     lc.Register(&Service{})
     
-    // Start all components with readiness probe
-    waitGracefulShutdown := lc.Run(context.Background(), func(err error) {
-        if err != nil {
-            log.Errorf("readiness probe failed: %v", err)
-        } else {
-            log.Info("All components are ready")
-        }
+    // Run lifecycle with blocking behavior and readiness callback
+    err := goscade.Run(context.Background(), lc, func() {
+        log.Info("All components are ready")
     })
     
-    // Awaiting graceful shutdown
-    if err := waitGracefulShutdown(); err != nil && !errors.Is(err, context.Canceled) {
+    // Handle any errors
+    if err != nil && !errors.Is(err, context.Canceled) {
         log.Errorf("%v", err)
     }
 }
@@ -82,7 +78,7 @@ Wrap existing components with custom logic:
 ```go
 // Wrap an existing HTTP server with custom startup logic
 server := &http.Server{Addr: ":8080"}
-adapter := goscade.NewAdapter(server, func(ctx context.Context, srv *http.Server, probe func(error)) error {
+adapter := goscade.NewAdapter(server, func(ctx context.Context, srv *http.Server, probe func(cause error)) error {
     // Custom startup logic
     probe(nil) // Signal readiness
     return srv.ListenAndServe()
@@ -144,7 +140,7 @@ childLC.Register(&Cache{})
 
 // Register child lifecycle as component in parent
 parentLC := goscade.NewLifecycle(log)
-parentLC.Register(childLC.AsComponent())
+parentLC.Register(childLC)
 parentLC.Register(&APIServer{})
 ```
 
@@ -163,6 +159,8 @@ parentLC.Register(&APIServer{})
 - Graceful shutdown on context cancellation
 - Error propagation through dependency graph
 - Optional observability: dependency and state inspection
+- Blocking lifecycle execution with helper functions
+- Optional signal handling for graceful shutdown
 
 ### Technical Limitations
 - Components must be pointers or interfaces for proper dependency detection
@@ -170,6 +168,8 @@ parentLC.Register(&APIServer{})
 - No built-in support for optional dependencies
 - Graph is built using reflection on startup, which introduces overhead proportional to the number and complexity of components
 - Explicit dependencies must be registered before the component that depends on them
+- Lifecycle does not respond to system signals by default (use `WithShutdownHook()` option)
+- Lifecycle.Run() now blocks until shutdown instead of returning a function
 
 ## License
 

@@ -2,7 +2,11 @@ package goscade
 
 import (
 	"context"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 // TestRegister tests the Register helper function.
@@ -176,5 +180,84 @@ func TestRegister_WithDuplicateImplicitDeps(t *testing.T) {
 
 	if compDeps[0] != dep {
 		t.Error("component should have the correct dependency")
+	}
+}
+
+// TestRun tests the Run helper function with successful component execution.
+func TestRun(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	readyCalled := false
+	comp := &mockComponentCyclic{}
+
+	err := Run(ctx, comp, func() {
+		readyCalled = true
+	})
+
+	if err != nil {
+		t.Errorf("expected no error, got %v", err)
+	}
+
+	assert.True(t, readyCalled, "ready callback should be called")
+}
+
+// TestRun_ComponentError tests the Run helper function with component error.
+func TestRun_ComponentError(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	comp := &errorComponent{}
+	err := Run(ctx, comp, func() {
+		t.Error("ready callback should not be called on component error")
+	})
+
+	if err == nil {
+		t.Error("expected error, got nil")
+	} else {
+		if !strings.Contains(err.Error(), "component error") {
+			t.Errorf("expected error to contain 'component error', got %v", err)
+		}
+	}
+}
+
+// TestRun_ProbeError tests the Run helper function with readiness probe error.
+func TestRun_ProbeError(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	comp := &probeErrorComponent{}
+
+	err := Run(ctx, comp, func() {
+		t.Error("ready callback should not be called on probe error")
+	})
+
+	if err == nil {
+		t.Error("expected error, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "probe error") {
+		t.Errorf("expected error to contain 'probe error', got %v", err)
+	}
+}
+
+// TestRun_Timeout tests the Run helper function with timeout.
+func TestRun_Timeout(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	// Component that takes longer than timeout
+	comp := &slowStartComponent{delay: 100 * time.Millisecond}
+
+	err := Run(ctx, comp, func() {
+		t.Error("ready callback should not be called on timeout")
+	})
+
+	if err == nil {
+		t.Error("expected error, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "context deadline exceeded") {
+		t.Errorf("expected error to contain 'context deadline exceeded', got %v", err)
 	}
 }
