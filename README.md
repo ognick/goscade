@@ -1,6 +1,9 @@
 # GOscade
 
 [![Tests](https://github.com/ognick/goscade/actions/workflows/go.yml/badge.svg?style=flat-square&branch=main)](https://github.com/ognick/goscade/actions/workflows/go.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/ognick/goscade/v2.svg)](https://pkg.go.dev/github.com/ognick/goscade/v2)
+[![Go Report Card](https://goreportcard.com/badge/github.com/ognick/goscade)](https://goreportcard.com/report/github.com/ognick/goscade)
+[![codecov](https://codecov.io/gh/ognick/goscade/branch/main/graph/badge.svg)](https://codecov.io/gh/ognick/goscade)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](https://opensource.org/licenses/MIT)
 
 **GOscade** is a lightweight Go library for managing the lifecycle and dependencies of concurrent components. Unlike other solutions, goscade focuses on simplicity, automatic dependency detection, and proper lifecycle management in a concurrent environment.
@@ -208,11 +211,9 @@ err := parentLC.Run(ctx, func(err error) {
 ### Technical Limitations
 - Components must be pointers or interfaces for proper dependency detection
 - Circular dependencies are disabled by default (can be enabled with `WithCircularDependency()`)
-- No built-in support for optional dependencies
 - Graph is built using reflection on startup, which introduces overhead proportional to the number and complexity of components
 - Explicit dependencies must be registered before the component that depends on them
-- Lifecycle does not respond to system signals by default (use `WithShutdownHook()` option)
-- `Lifecycle.Run()` blocks until shutdown and returns an error (changed from v2.0.x which returned a function)
+
 
 ## License
 
