@@ -8,7 +8,7 @@ import (
 
 // TestFIFOQueue_Push tests adding items to the end of a FIFO queue.
 func TestFIFOQueue_Push(t *testing.T) {
-	queue := &FIFOQueue[int]{}
+	queue := &fifoQueue[int]{}
 
 	queue.Push(1)
 	queue.Push(2)
@@ -34,7 +34,7 @@ func TestFIFOQueue_Push(t *testing.T) {
 
 // TestFIFOQueue_Pop tests removing items from a FIFO queue in correct order.
 func TestFIFOQueue_Pop(t *testing.T) {
-	queue := &FIFOQueue[string]{}
+	queue := &fifoQueue[string]{}
 
 	// Test empty queue
 	_, ok := queue.Pop()
@@ -65,7 +65,7 @@ func TestFIFOQueue_Pop(t *testing.T) {
 
 // TestFIFOQueue_IsEmpty tests the IsEmpty method of a FIFO queue.
 func TestFIFOQueue_IsEmpty(t *testing.T) {
-	queue := &FIFOQueue[int]{}
+	queue := &fifoQueue[int]{}
 
 	assert.True(t, queue.IsEmpty())
 
@@ -78,7 +78,7 @@ func TestFIFOQueue_IsEmpty(t *testing.T) {
 
 // TestLIFOQueue_Push tests adding items to the end of a LIFO queue.
 func TestLIFOQueue_Push(t *testing.T) {
-	queue := &LIFOQueue[int]{}
+	queue := &lifoQueue[int]{}
 
 	queue.Push(1)
 	queue.Push(2)
@@ -104,7 +104,7 @@ func TestLIFOQueue_Push(t *testing.T) {
 
 // TestLIFOQueue_Pop tests removing items from a LIFO queue in LIFO order.
 func TestLIFOQueue_Pop(t *testing.T) {
-	queue := &LIFOQueue[string]{}
+	queue := &lifoQueue[string]{}
 
 	// Test empty queue
 	_, ok := queue.Pop()
@@ -135,7 +135,7 @@ func TestLIFOQueue_Pop(t *testing.T) {
 
 // TestLIFOQueue_IsEmpty tests the IsEmpty method of a LIFO queue.
 func TestLIFOQueue_IsEmpty(t *testing.T) {
-	queue := &LIFOQueue[int]{}
+	queue := &lifoQueue[int]{}
 
 	assert.True(t, queue.IsEmpty())
 
@@ -146,10 +146,10 @@ func TestLIFOQueue_IsEmpty(t *testing.T) {
 	assert.True(t, queue.IsEmpty())
 }
 
-// TestQueue_Interface tests that both FIFOQueue and LIFOQueue implement the Queue interface.
+// TestQueue_Interface tests that both fifoQueue and lifoQueue implement the queue interface.
 func TestQueue_Interface(t *testing.T) {
-	var fifoQueue Queue[int] = &FIFOQueue[int]{}
-	var lifoQueue Queue[int] = &LIFOQueue[int]{}
+	var fifoQueue queue[int] = &fifoQueue[int]{}
+	var lifoQueue queue[int] = &lifoQueue[int]{}
 
 	// Test that FIFOQueue implements Queue interface
 	fifoQueue.Push(1)
@@ -179,8 +179,8 @@ func TestQueue_ComplexTypes(t *testing.T) {
 		Name string
 	}
 
-	// Test FIFOQueue with structs
-	fifoQueue := &FIFOQueue[TestStruct]{}
+	// Test fifoQueue with structs
+	fifoQueue := &fifoQueue[TestStruct]{}
 
 	fifoQueue.Push(TestStruct{ID: 1, Name: "first"})
 	fifoQueue.Push(TestStruct{ID: 2, Name: "second"})
@@ -190,8 +190,8 @@ func TestQueue_ComplexTypes(t *testing.T) {
 	assert.Equal(t, 1, item.ID)
 	assert.Equal(t, "first", item.Name)
 
-	// Test LIFOQueue with structs
-	lifoQueue := &LIFOQueue[TestStruct]{}
+	// Test lifoQueue with structs
+	lifoQueue := &lifoQueue[TestStruct]{}
 
 	lifoQueue.Push(TestStruct{ID: 1, Name: "first"})
 	lifoQueue.Push(TestStruct{ID: 2, Name: "second"})

@@ -17,7 +17,7 @@ import (
 //   - parents: map to collect found parent components
 func (lc *lifecycle) findParentComponents(root Component) map[Component]struct{} {
 	visited := make(map[uintptr]struct{})
-	queue := FIFOQueue[reflect.Value]{}
+	queue := fifoQueue[reflect.Value]{}
 	queue.Push(reflect.ValueOf(root))
 	parents := make(map[Component]struct{})
 	for dep := range lc.compToImplicitDeps[root] {
@@ -87,7 +87,7 @@ func findCircularDependencies(
 	removeCircularDependency bool,
 ) {
 	for root := range compToParents {
-		queue := FIFOQueue[Component]{}
+		queue := fifoQueue[Component]{}
 		queue.Push(root)
 		for !queue.IsEmpty() {
 			node, _ := queue.Pop()
