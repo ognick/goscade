@@ -1,8 +1,8 @@
 package goscade
 
-// Queue defines a generic queue interface for managing items of type T.
+// queue defines a generic queue interface for managing items of type T.
 // It provides basic operations for adding, removing, and checking the queue state.
-type Queue[T any] interface {
+type queue[T any] interface {
 	// Push adds an item to the queue.
 	Push(item T)
 
@@ -14,20 +14,20 @@ type Queue[T any] interface {
 	IsEmpty() bool
 }
 
-// FIFOQueue implements a First-In-First-Out queue using a slice.
+// fifoQueue implements a First-In-First-Out queue using a slice.
 // Items are added to the end and removed from the beginning.
-type FIFOQueue[T any] struct {
+type fifoQueue[T any] struct {
 	items []T
 }
 
 // Push adds an item to the end of the FIFO queue.
-func (q *FIFOQueue[T]) Push(item T) {
+func (q *fifoQueue[T]) Push(item T) {
 	q.items = append(q.items, item)
 }
 
 // Pop removes and returns the first item from the FIFO queue.
 // Returns the item and true if successful, or zero value and false if empty.
-func (q *FIFOQueue[T]) Pop() (T, bool) {
+func (q *fifoQueue[T]) Pop() (T, bool) {
 	if q.IsEmpty() {
 		var zero T
 		return zero, false
@@ -38,24 +38,24 @@ func (q *FIFOQueue[T]) Pop() (T, bool) {
 }
 
 // IsEmpty returns true if the FIFO queue contains no items.
-func (q *FIFOQueue[T]) IsEmpty() bool {
+func (q *fifoQueue[T]) IsEmpty() bool {
 	return len(q.items) == 0
 }
 
-// LIFOQueue implements a Last-In-First-Out queue (stack) using a slice.
+// lifoQueue implements a Last-In-First-Out queue (stack) using a slice.
 // Items are added to the end and removed from the end.
-type LIFOQueue[T any] struct {
+type lifoQueue[T any] struct {
 	items []T
 }
 
 // Push adds an item to the end of the LIFO queue.
-func (q *LIFOQueue[T]) Push(item T) {
+func (q *lifoQueue[T]) Push(item T) {
 	q.items = append(q.items, item)
 }
 
 // Pop removes and returns the last item from the LIFO queue.
 // Returns the item and true if successful, or zero value and false if empty.
-func (q *LIFOQueue[T]) Pop() (T, bool) {
+func (q *lifoQueue[T]) Pop() (T, bool) {
 	if q.IsEmpty() {
 		var zero T
 		return zero, false
@@ -67,6 +67,6 @@ func (q *LIFOQueue[T]) Pop() (T, bool) {
 }
 
 // IsEmpty returns true if the LIFO queue contains no items.
-func (q *LIFOQueue[T]) IsEmpty() bool {
+func (q *lifoQueue[T]) IsEmpty() bool {
 	return len(q.items) == 0
 }
