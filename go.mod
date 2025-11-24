@@ -1,4 +1,4 @@
-module github.com/ognick/goscade
+module github.com/ognick/goscade/v2
 
 go 1.22
 
