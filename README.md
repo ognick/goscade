@@ -11,6 +11,7 @@ goscade is a thin wrapper at the application's top level that doesn't penetrate 
 
 - **Automatic dependency detection** - No manual dependency declaration needed
 - **Explicit dependency declaration** - Support for implicit dependencies when automatic detection is not sufficient
+- **Fluent API** - Chain component creation and registration with `Register()` helper
 - **Concurrent execution** - Components run in parallel when possible
 - **Graceful shutdown** - Proper cleanup with dependency awareness
 - **Health checks** - Built-in readiness probe system
@@ -18,12 +19,12 @@ goscade is a thin wrapper at the application's top level that doesn't penetrate 
 - **Adapter pattern** - Wrap existing components with custom logic
 - **Circular dependency handling** - Optional support for circular dependencies
 - **Configurable timeouts** - Set custom timeouts for component startup
-- **Nested lifecycle** - Use lifecycle as a component in another lifecycle
+- **Nested lifecycle** - Lifecycle implements Component interface, can be used as a component in another lifecycle
 
 ## Installation
 
 ```bash
-go get github.com/ognick/goscade
+go get github.com/ognick/goscade/v2
 ```
 
 ## Quick Start
@@ -35,23 +36,51 @@ import (
     "context"
     "errors"
 
-    "github.com/ognick/goscade"
+    "github.com/ognick/goscade/v2"
 )
 
+// Logger interface that your logger must implement
+type Logger interface {
+    Infof(format string, args ...interface{})
+    Errorf(format string, args ...interface{})
+}
+
+// Example component that implements goscade.Component
+type Server struct {
+    addr string
+}
+
+func (s *Server) Run(ctx context.Context, readinessProbe func(error)) error {
+    // Start your server here
+    readinessProbe(nil) // Signal that server is ready
+    <-ctx.Done()        // Wait for shutdown signal
+    return nil
+}
+
 func main() {
-    // Create lifecycle manager
-    log := logger.NewLogger()
+    // Create a logger that implements Infof and Errorf methods
+    log := &myLogger{} // Your logger implementation
+    
+    // Create lifecycle manager with signal handling
     lc := goscade.NewLifecycle(log, goscade.WithShutdownHook())
 
-    // Register components
-    lc.Register(&Database{})
-    lc.Register(&Cache{})
-    lc.Register(&Service{})
+    // Register components using fluent API
+    server := goscade.Register(lc, &Server{addr: ":8080"})
+    _ = server // Use the registered component if needed
     
-    // Run lifecycle with blocking behavior and readiness callback
+    // Option 1: Use helper function with callback
     err := goscade.Run(context.Background(), lc, func() {
-        log.Info("All components are ready")
+        log.Infof("All components are ready")
     })
+    
+    // Option 2: Use lifecycle.Run() directly
+    // err := lc.Run(context.Background(), func(err error) {
+    //     if err == nil {
+    //         log.Infof("All components are ready")
+    //     } else {
+    //         log.Errorf("Startup error: %v", err)
+    //     }
+    // })
     
     // Handle any errors
     if err != nil && !errors.Is(err, context.Canceled) {
@@ -95,6 +124,11 @@ Chain component creation and registration:
 server := goscade.Register(lc, NewServer(handler))
 db := goscade.Register(lc, NewDatabase(config))
 cache := goscade.Register(lc, NewCache(db))
+
+// Alternative: traditional registration
+lc.Register(NewServer(handler))
+lc.Register(NewDatabase(config))
+lc.Register(NewCache(db))
 ```
 
 ### Explicit Dependencies
@@ -130,7 +164,7 @@ lc := goscade.NewLifecycle(log, goscade.WithStartTimeout(30*time.Second))
 ```
 
 ### Nested Lifecycle
-Use lifecycle as a component in another lifecycle:
+Lifecycle implements the Component interface, so you can use it as a component in another lifecycle:
 
 ```go
 // Create child lifecycle with components
@@ -138,10 +172,17 @@ childLC := goscade.NewLifecycle(log)
 childLC.Register(&Database{})
 childLC.Register(&Cache{})
 
-// Register child lifecycle as component in parent
+// Register child lifecycle as component in parent (no casting needed)
 parentLC := goscade.NewLifecycle(log)
-parentLC.Register(childLC)
+parentLC.Register(childLC) // Lifecycle is a Component
 parentLC.Register(&APIServer{})
+
+// Run parent lifecycle - it will manage child lifecycle as a component
+err := parentLC.Run(ctx, func(err error) {
+    if err == nil {
+        log.Infof("All lifecycles are ready")
+    }
+})
 ```
 
 ## Requirements
@@ -154,13 +195,15 @@ parentLC.Register(&APIServer{})
 - Component lifecycle management (idle → running → ready → stopping → stopped)
 - Automatic dependency graph building through reflection
 - Explicit dependency declaration for complex scenarios
+- Fluent API for component registration with `goscade.Register()`
 - Topological sorting and component startup
 - Readiness signaling via `readinessProbe`
 - Graceful shutdown on context cancellation
 - Error propagation through dependency graph
 - Optional observability: dependency and state inspection
-- Blocking lifecycle execution with helper functions
-- Optional signal handling for graceful shutdown
+- Blocking lifecycle execution with `goscade.Run()` helper function
+- Lifecycle implements Component interface (can be nested)
+- Optional signal handling for graceful shutdown with `WithShutdownHook()`
 
 ### Technical Limitations
 - Components must be pointers or interfaces for proper dependency detection
@@ -169,7 +212,7 @@ parentLC.Register(&APIServer{})
 - Graph is built using reflection on startup, which introduces overhead proportional to the number and complexity of components
 - Explicit dependencies must be registered before the component that depends on them
 - Lifecycle does not respond to system signals by default (use `WithShutdownHook()` option)
-- Lifecycle.Run() now blocks until shutdown instead of returning a function
+- `Lifecycle.Run()` blocks until shutdown and returns an error (changed from v2.0.x which returned a function)
 
 ## License
 
