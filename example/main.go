@@ -22,18 +22,21 @@ func main() {
 
 	// Create lifecycle with signal handling enabled
 	lc := goscade.NewLifecycle(log, goscade.WithShutdownHook())
+	uc := usecase.NewUsecase(log)
+	
 	lc.Register(pkg.NewServer(
 		addr,
-		api.NewHandler(
-			log,
-			usecase.NewUsecase(log),
-		),
+		api.NewHandler(log, uc),
 	))
 
 	// Run lifecycle with blocking behavior and readiness callback
 	// The lifecycle will block until shutdown and call the callback when ready
 	err := goscade.Run(context.Background(), lc, func() {
 		log.Infof("HTTP started on http://%s", addr)
+		
+		// Display dependency graph of internal components
+		graph := uc.GraphDOT(context.Background(), "default")
+		log.Infof("Internal dependency graph (DOT format):\n%s", graph)
 	})
 	if err != nil && !errors.Is(err, context.Canceled) {
 		log.Fatalf("%v", err)

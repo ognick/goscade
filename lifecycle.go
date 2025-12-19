@@ -66,6 +66,10 @@ type Lifecycle interface {
 	// Dependencies returns a map showing the dependency graph of all registered components.
 	Dependencies() map[Component][]Component
 
+	// BuildGraph constructs a visual graph representation based on component dependencies.
+	// Returns a Graph structure containing all nodes (components) and edges (dependencies).
+	BuildGraph() Graph
+
 	// Register adds a component to the lifecycle manager.
 	// The component must be a pointer or interface type.
 	// Optional implicitDeps allows explicit dependency declaration when automatic
@@ -95,6 +99,7 @@ type lifecycle struct {
 	ignoreCircularDependency bool
 	shutdownHook             bool
 	startTimeout             time.Duration
+	graphOutputFile          string
 }
 
 // Option is a function type for configuring lifecycle behavior.
@@ -125,6 +130,15 @@ func WithShutdownHook() Option {
 func WithStartTimeout(timeout time.Duration) Option {
 	return func(lc *lifecycle) {
 		lc.startTimeout = timeout
+	}
+}
+
+// WithGraphOutput enables writing the dependency graph to a file in DOT format.
+// The file will be written when the lifecycle starts running.
+// Use Graphviz (e.g., dot -Tpng graph.dot -o graph.png) to visualize the output.
+func WithGraphOutput(filename string) Option {
+	return func(lc *lifecycle) {
+		lc.graphOutputFile = filename
 	}
 }
 
@@ -205,6 +219,14 @@ func (lc *lifecycle) Status() LifecycleStatus {
 	lc.mu.RLock()
 	defer lc.mu.RUnlock()
 	return lc.status
+}
+
+// componentName returns the display name for a component.
+func (lc *lifecycle) componentName(comp Component) string {
+	if a, ok := comp.(delegateNameProvider); ok {
+		return a.delegateName()
+	}
+	return reflect.TypeOf(comp).String()
 }
 
 // componentState holds the runtime state for a component including
@@ -336,6 +358,10 @@ func (lc *lifecycle) Run(ctx context.Context, readinessProbe func(err error)) er
 	lifecycleCtx, lifecycleCtxCancel := context.WithCancelCause(ctx)
 	compToParents := lc.buildCompToParents()
 	compToChildren := lc.buildCompToChildren(compToParents)
+
+	if err := lc.writeGraphToFile(); err != nil {
+		lc.log.Errorf("Failed to write graph: %v", err)
+	}
 	runner := &errgroup.Group{}
 	prober := &errgroup.Group{}
 	startLatch := make(chan struct{})
@@ -348,10 +374,7 @@ func (lc *lifecycle) Run(ctx context.Context, readinessProbe func(err error)) er
 		state.runCtx, state.cancelRun = context.WithCancelCause(context.Background())
 
 		state.teardownCtx, state.cancelTeardown = context.WithCancelCause(context.Background())
-		state.componentName = reflect.TypeOf(comp).String()
-		if a, ok := comp.(delegateNameProvider); ok {
-			state.componentName = a.delegateName()
-		}
+		state.componentName = lc.componentName(comp)
 	}
 
 	for comp := range lc.components {

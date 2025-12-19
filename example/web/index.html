@@ -82,6 +82,7 @@
 <div id="toolbar">
     <button id="start-btn" onclick="startSystem()">Start</button>
     <button onclick="stopSystem()">Stop</button>
+    <button onclick="downloadGraph()">Download DOT</button>
 </div>
 <div id="statusline">
     <b>Status:</b> <span id="status-state"></span>
@@ -318,6 +319,20 @@
 
     async function stopSystem() {
         await fetch(`/stop?graph_id=${graphId}`, { method: 'POST' });
+    }
+
+    async function downloadGraph() {
+        const res = await fetch(`/graph/dot?graph_id=${graphId}`);
+        const data = await res.text();
+        const blob = new Blob([data], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `graph-${graphId}.dot`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
     }
 
     // Initial zoom restoration

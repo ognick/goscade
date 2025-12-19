@@ -117,6 +117,11 @@ func (u *Usecase) Graph(_ context.Context, graphID string) (domain.Graph, error)
 	}, nil
 }
 
+func (u *Usecase) GraphDOT(_ context.Context, graphID string) string {
+	graph := u.acquireGraph(graphID, false)
+	return graph.lc.BuildGraph().ToDOT()
+}
+
 func (u *Usecase) StartAll(_ context.Context, graphID string) error {
 	graph := u.acquireGraph(graphID, true)
 	status := graph.lc.Status()
