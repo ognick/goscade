@@ -16,6 +16,7 @@ type logger interface {
 
 type usecase interface {
 	Graph(ctx context.Context, graphID string) (domain.Graph, error)
+	GraphDOT(ctx context.Context, graphID string) string
 	StartAll(ctx context.Context, graphID string) error
 	StopAll(ctx context.Context, graphID string) error
 	UpdateComponent(ctx context.Context, graphID, compID string, delay time.Duration, err *string) error
@@ -34,6 +35,7 @@ func NewHandler(log logger, usecase usecase) http.Handler {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/graph", h.handleGraph)
+	mux.HandleFunc("/graph/dot", h.handleGraphDOT)
 	mux.HandleFunc("/start", h.handleStart)
 	mux.HandleFunc("/stop", h.handleStop)
 	mux.HandleFunc("/component/update", h.handleUpdateComponent)
@@ -58,6 +60,16 @@ func (h *handler) handleGraph(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(graph); err != nil {
 		h.log.Errorf("failed to encode graph: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	}
+}
+
+func (h *handler) handleGraphDOT(w http.ResponseWriter, r *http.Request) {
+	dot := h.usecase.GraphDOT(r.Context(), h.getGraphID(r))
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	if _, err := w.Write([]byte(dot)); err != nil {
+		h.log.Errorf("failed to write graph: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}
 }

@@ -163,7 +163,62 @@ lc := goscade.NewLifecycle(logger,
     
     // Allow circular dependencies (use with caution)
     goscade.WithCircularDependency(),
+    
+    // Export dependency graph to DOT file on startup
+    goscade.WithGraphOutput("graph.dot"),
 )
+```
+
+### Dependency Graph Export
+
+GOscade can export the component dependency graph in DOT format (Graphviz).
+
+#### Get Graph Programmatically
+
+```go
+// Build graph structure
+graph := lc.BuildGraph()
+
+// Convert to DOT format
+dotString := graph.ToDOT()
+fmt.Println(dotString)
+```
+
+#### Auto-save to File
+
+```go
+// Graph will be saved to file when lifecycle starts
+lc := goscade.NewLifecycle(logger, 
+    goscade.WithGraphOutput("graph.dot"),
+)
+```
+
+#### Visualize with Graphviz
+
+```bash
+# Generate PNG image
+dot -Tpng graph.dot -o graph.png
+
+# Generate SVG
+dot -Tsvg graph.dot -o graph.svg
+
+# Generate PDF
+dot -Tpdf graph.dot -o graph.pdf
+```
+
+**Example DOT output:**
+
+```dot
+digraph G {
+  rankdir=TB;
+
+  "Database" [label="Database", shape=box];
+  "Cache" [label="Cache", shape=box];
+  "APIServer" [label="APIServer", shape=box];
+
+  "Database" -> "Cache";
+  "Cache" -> "APIServer";
+}
 ```
 
 ## Visual Examples
