@@ -49,7 +49,11 @@ func (lc *lifecycle) findParentComponents(root Component) map[Component]struct{}
 
 		switch val.Kind() {
 		case reflect.Struct:
+			t := val.Type()
 			for i := 0; i < val.NumField(); i++ {
+				if t.Field(i).Tag.Get("goscade") == "ignore" {
+					continue
+				}
 				queue.Push(val.Field(i))
 			}
 

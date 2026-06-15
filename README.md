@@ -112,6 +112,17 @@ func main() {
 }
 ```
 
+To exclude a struct field from reflection-based dependency detection, tag it with `goscade:"ignore"`. The field (and anything reachable through it) will not be traversed.
+
+This is useful for externally-managed dependencies that GOscade does not own. Such third-party clients may spawn their own goroutines, so letting GOscade treat them as part of the managed lifecycle can lead to race conditions. Tagging them as ignored keeps them out of the dependency graph:
+
+```go
+type Service struct {
+    DB         *Database
+    PaymentAPI *stripe.Client `goscade:"ignore"` // externally-managed, may run its own goroutines
+}
+```
+
 If you need to declare dependencies that cannot be detected via reflection (e.g. hidden inside closures or non-struct fields), use explicit declaration:
 
 ```go

@@ -38,6 +38,16 @@ func (c *ComplexStruct) Run(ctx context.Context, readinessProbe func(cause error
 	return nil
 }
 
+// IgnoreTagStruct is used to test the goscade:"ignore" field tag
+type IgnoreTagStruct struct {
+	Dep1 *mockComponent
+	Dep2 *mockComponent `goscade:"ignore"`
+}
+
+func (s *IgnoreTagStruct) Run(ctx context.Context, readinessProbe func(cause error)) error {
+	return nil
+}
+
 // RecStruct is used to test recursive structures
 type RecStruct struct {
 	Name string
@@ -105,6 +115,22 @@ func TestFindParentComponents_Struct(t *testing.T) {
 	if len(parents) != 1 {
 		t.Errorf("Expected 1 parent, got %d", len(parents))
 	}
+}
+
+// TestFindParentComponents_IgnoreTag tests that fields tagged goscade:"ignore" are skipped
+func TestFindParentComponents_IgnoreTag(t *testing.T) {
+	lc := newTestLifecycle()
+
+	dep1 := &mockComponent{name: "dep1"}
+	dep2 := &mockComponent{name: "dep2"}
+	lc.ptrToComp[reflect.ValueOf(dep1).Pointer()] = dep1
+	lc.ptrToComp[reflect.ValueOf(dep2).Pointer()] = dep2
+
+	testStruct := &IgnoreTagStruct{Dep1: dep1, Dep2: dep2}
+	parents := lc.findParentComponents(testStruct)
+	assert.Len(t, parents, 1)
+	assert.Contains(t, parents, Component(dep1))
+	assert.NotContains(t, parents, Component(dep2))
 }
 
 // TestDependencies_Empty tests Dependencies with empty component set
