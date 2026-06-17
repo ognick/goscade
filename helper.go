@@ -29,6 +29,18 @@ func Register[T Component](lc Lifecycle, component T, implicitDeps ...Component)
 	return component
 }
 
+// Link is a convenience function that registers a component, declares explicit
+// struct dependencies on it (see Lifecycle.Link), and returns the same
+// component for fluent-style wiring.
+//
+// Example:
+//
+//	root := Link(lc, NewService(), wiringStruct) // root depends on components inside wiringStruct
+func Link[T Component](lc Lifecycle, component T, deps ...any) T {
+	lc.Link(component, deps...)
+	return component
+}
+
 // Run executes a single component with blocking behavior and readiness callback.
 // This is a convenience function for running individual components outside of
 // a lifecycle manager. The method blocks until the component is ready or fails.

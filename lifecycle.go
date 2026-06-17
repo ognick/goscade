@@ -76,6 +76,14 @@ type Lifecycle interface {
 	// detection is not sufficient (e.g., interface dependencies, function parameters).
 	Register(component Component, implicitDeps ...Component)
 
+	// Link declares explicit dependencies on arbitrary structs for component.
+	// Each struct in deps is reflection-walked during dependency analysis, and
+	// every registered Component reachable inside it becomes a parent of
+	// component — exactly as if component had a field referencing that struct.
+	// The structs are never nodes in the graph and are never run.
+	// component is registered if it was not already (idempotent).
+	Link(component Component, deps ...any)
+
 	// Run starts all registered components and blocks until shutdown.
 	// The method handles dependency resolution, concurrent startup, and graceful shutdown.
 	// The readinessProbe callback is called when all components are ready or if there's an error during startup.
@@ -92,6 +100,7 @@ type lifecycle struct {
 	status             LifecycleStatus
 	statusListener     chan LifecycleStatus
 	compToImplicitDeps map[Component]map[Component]struct{}
+	compToLinkedDeps   map[Component][]any
 	components         map[Component]struct{}
 	ptrToComp          map[uintptr]Component
 	log                logger
@@ -150,6 +159,7 @@ func NewLifecycle(log logger, opts ...Option) Lifecycle {
 		log:                log,
 		status:             LifecycleStatusIdle,
 		compToImplicitDeps: make(map[Component]map[Component]struct{}),
+		compToLinkedDeps:   make(map[Component][]any),
 		statusListener:     make(chan LifecycleStatus),
 		components:         make(map[Component]struct{}),
 		ptrToComp:          make(map[uintptr]Component),
@@ -184,6 +194,16 @@ func (lc *lifecycle) Register(comp Component, implicitDeps ...Component) {
 		lc.Register(dep)
 		lc.compToImplicitDeps[comp][dep] = struct{}{}
 	}
+}
+
+// Link declares explicit dependencies on arbitrary structs for comp.
+// It registers comp if necessary (idempotent), then records each dep so that
+// findParentComponents walks it during dependency analysis. Any registered
+// Component reachable inside a dep becomes a parent of comp. The deps themselves
+// are never registered as components and are never run.
+func (lc *lifecycle) Link(comp Component, deps ...any) {
+	lc.Register(comp)
+	lc.compToLinkedDeps[comp] = append(lc.compToLinkedDeps[comp], deps...)
 }
 
 // setStatus updates the lifecycle status with proper state transition validation.
