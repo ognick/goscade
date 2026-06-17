@@ -60,6 +60,158 @@ func newTestLifecycle() *lifecycle {
 	return NewLifecycle(&mockLogger{}).(*lifecycle)
 }
 
+// TestLink_RegistersComponentAndStoresDeps verifies Link registers the
+// component (idempotent) and records the explicit struct deps.
+func TestLink_RegistersComponentAndStoresDeps(t *testing.T) {
+	lc := newTestLifecycle()
+
+	comp := &mockComponent{name: "test"}
+	type wiring struct{ X int }
+	w := &wiring{X: 1}
+
+	lc.Link(comp, w)
+
+	if _, ok := lc.components[comp]; !ok {
+		t.Fatalf("expected Link to register the component")
+	}
+	if len(lc.compToLinkedDeps[comp]) != 1 {
+		t.Fatalf("expected 1 explicit dep, got %d", len(lc.compToLinkedDeps[comp]))
+	}
+
+	// Idempotent: calling Link again appends, does not duplicate the component.
+	lc.Link(comp, w)
+	if len(lc.components) != 1 {
+		t.Fatalf("expected 1 component after second Link, got %d", len(lc.components))
+	}
+	if len(lc.compToLinkedDeps[comp]) != 2 {
+		t.Fatalf("expected 2 explicit deps after second Link, got %d", len(lc.compToLinkedDeps[comp]))
+	}
+}
+
+// TestLink_DiscoversComponentBehindStruct verifies that a component with no
+// field reference to another component still gets it as a parent when an
+// arbitrary struct that references it is linked explicitly.
+func TestLink_DiscoversComponentBehindStruct(t *testing.T) {
+	lc := newTestLifecycle()
+
+	dep := Register(lc, &mockComponent{name: "dep"})
+
+	// wiring is NOT a Component; it holds a reference to dep.
+	type wiring struct {
+		Comp *mockComponent
+	}
+	w := &wiring{Comp: dep}
+
+	// root has no field referencing dep at all.
+	root := &mockComponent{name: "root"}
+	lc.Link(root, w)
+
+	parents := lc.findParentComponents(root)
+	if len(parents) != 1 {
+		t.Fatalf("expected 1 parent discovered through the lens, got %d", len(parents))
+	}
+	if _, ok := parents[dep]; !ok {
+		t.Fatalf("expected dep to be a parent of root")
+	}
+}
+
+// TestLinkHelper_ReturnsComponentAndLinks verifies the package-level Link
+// helper registers, links, and returns the same component.
+func TestLinkHelper_ReturnsComponentAndLinks(t *testing.T) {
+	lc := newTestLifecycle()
+
+	dep := Register(lc, &mockComponent{name: "dep"})
+	type wiring struct{ Comp *mockComponent }
+	w := &wiring{Comp: dep}
+
+	root := Link(lc, &mockComponent{name: "root"}, w)
+
+	if root == nil {
+		t.Fatalf("expected Link to return the component")
+	}
+	parents := lc.findParentComponents(root)
+	if _, ok := parents[dep]; !ok {
+		t.Fatalf("expected dep to be a parent of root via the helper")
+	}
+}
+
+// TestLink_NoSelfParent verifies a lens that references the component itself
+// does not produce a self-parent.
+func TestLink_NoSelfParent(t *testing.T) {
+	lc := newTestLifecycle()
+
+	root := Register(lc, &mockComponent{name: "root"})
+	type wiring struct{ Self *mockComponent }
+	w := &wiring{Self: root}
+	lc.Link(root, w)
+
+	parents := lc.findParentComponents(root)
+	if len(parents) != 0 {
+		t.Fatalf("expected no self-parent, got %d parents", len(parents))
+	}
+}
+
+// TestLink_EmptyAndNilDeps verifies Link with no deps or a nil dep is safe.
+func TestLink_EmptyAndNilDeps(t *testing.T) {
+	lc := newTestLifecycle()
+
+	root := &mockComponent{name: "root"}
+	lc.Link(root)      // no deps
+	lc.Link(root, nil) // nil dep
+
+	parents := lc.findParentComponents(root)
+	if len(parents) != 0 {
+		t.Fatalf("expected no parents, got %d", len(parents))
+	}
+}
+
+// TestLink_MultipleComponentsBehindStruct verifies all components reachable
+// inside the lens (incl. nested structs) become parents.
+func TestLink_MultipleComponentsBehindStruct(t *testing.T) {
+	lc := newTestLifecycle()
+
+	a := Register(lc, &mockComponent{name: "a"})
+	b := Register(lc, &mockComponent{name: "b"})
+
+	type inner struct{ B *mockComponent }
+	type wiring struct {
+		A     *mockComponent
+		Inner inner
+	}
+	w := &wiring{A: a, Inner: inner{B: b}}
+
+	root := &mockComponent{name: "root"}
+	lc.Link(root, w)
+
+	parents := lc.findParentComponents(root)
+	if len(parents) != 2 {
+		t.Fatalf("expected 2 parents, got %d", len(parents))
+	}
+	if _, ok := parents[a]; !ok {
+		t.Fatalf("expected a to be a parent")
+	}
+	if _, ok := parents[b]; !ok {
+		t.Fatalf("expected b to be a parent")
+	}
+}
+
+// TestLink_CycleViaLensPanics verifies a cycle introduced through a lens is
+// detected by Dependencies().
+func TestLink_CycleViaLensPanics(t *testing.T) {
+	lc := newTestLifecycle()
+
+	a := Register(lc, &mockComponent{name: "a"})
+	b := Register(lc, &mockComponent{name: "b"})
+
+	// a depends on b, and b depends on a — both via lenses → cycle.
+	type wiringA struct{ B *mockComponent }
+	type wiringB struct{ A *mockComponent }
+	lc.Link(a, &wiringA{B: b})
+	lc.Link(b, &wiringB{A: a})
+
+	assert.Panicsf(t, func() { lc.Dependencies() }, "expected panic due to cycle via lenses")
+}
+
 // TestFindParentComponents_Empty tests findParentComponents with empty values
 func TestFindParentComponents_Empty(t *testing.T) {
 	lc := newTestLifecycle()

@@ -119,6 +119,29 @@ If you need to declare dependencies that cannot be detected via reflection (e.g.
 goscade.Register(lc, service, db)
 ```
 
+#### Linking dependencies through an arbitrary struct
+
+When a component has no reflectable field path to the components it depends on
+(the link runs through a wiring struct, closures, etc.), use `Link` to point it
+at an arbitrary struct. The struct is reflection-walked during graph building
+and every registered component reachable inside it becomes a parent — as if the
+component had a field referencing that struct. The struct itself is never a node
+and is never run.
+
+```go
+// wiring is a plain struct, not a Component.
+type wiring struct {
+    DB    *Database
+    Cache *Cache
+}
+
+w := &wiring{DB: db, Cache: cache}
+
+// service depends on every registered component reachable inside w (db, cache),
+// even though service has no field referencing them.
+goscade.Link(lc, service, w)
+```
+
 ### Adapter Pattern
 
 Use `NewAdapter` to wrap existing types (like `http.Server`) without defining a new struct.

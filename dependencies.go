@@ -24,6 +24,13 @@ func (lc *lifecycle) findParentComponents(root Component) map[Component]struct{}
 		parents[dep] = struct{}{}
 	}
 
+	// Explicit struct deps (from Link) are seeded as extra traversal roots so
+	// the BFS below walks them exactly as if they were fields of root. They are
+	// pushed AFTER root's own value, so the self-skip logic still excludes root.
+	for _, dep := range lc.compToLinkedDeps[root] {
+		queue.Push(reflect.ValueOf(dep))
+	}
+
 	var initialized bool
 	for !queue.IsEmpty() {
 		val, _ := queue.Pop()
