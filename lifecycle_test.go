@@ -306,23 +306,22 @@ func TestLifecycle_NoComponents(t *testing.T) {
 func TestLifecycle_Status_Transitions(t *testing.T) {
 	lc := NewLifecycle(&mockLogger{})
 	lcImpl := lc.(*lifecycle)
-	ctx := context.Background()
 	if lc.Status() != LifecycleStatusIdle {
 		t.Errorf("expected status idle, got %s", lc.Status())
 	}
-	lcImpl.setStatus(ctx, LifecycleStatusRunning)
+	lcImpl.setStatus(LifecycleStatusRunning)
 	if lc.Status() != LifecycleStatusRunning {
 		t.Errorf("expected status running, got %s", lc.Status())
 	}
-	lcImpl.setStatus(ctx, LifecycleStatusReady)
+	lcImpl.setStatus(LifecycleStatusReady)
 	if lc.Status() != LifecycleStatusReady {
 		t.Errorf("expected status ready, got %s", lc.Status())
 	}
-	lcImpl.setStatus(ctx, LifecycleStatusStopping)
+	lcImpl.setStatus(LifecycleStatusStopping)
 	if lc.Status() != LifecycleStatusStopping {
 		t.Errorf("expected status stopping, got %s", lc.Status())
 	}
-	lcImpl.setStatus(ctx, LifecycleStatusStopped)
+	lcImpl.setStatus(LifecycleStatusStopped)
 	if lc.Status() != LifecycleStatusStopped {
 		t.Errorf("expected status stopped, got %s", lc.Status())
 	}
@@ -518,7 +517,8 @@ func TestRunComponent_ParentDependencyFailure(t *testing.T) {
 	<-readinessProbe
 	// Wait for graceful shutdown
 	shutdownErr := errGroup.Wait()
-	assert.EqualError(t, shutdownErr, "component error")
+	assert.Error(t, shutdownErr)
+	assert.Contains(t, shutdownErr.Error(), "component *goscade.errorComponent: component error")
 }
 
 // cascadeComponent causes cascade shutdown for testing

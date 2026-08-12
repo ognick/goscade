@@ -160,6 +160,9 @@ lc := goscade.NewLifecycle(logger,
     
     // Set timeout for components to become ready
     goscade.WithStartTimeout(30 * time.Second),
+
+    // Bound graceful shutdown (default: 1 minute)
+    goscade.WithShutdownTimeout(30 * time.Second),
     
     // Allow circular dependencies (use with caution)
     goscade.WithCircularDependency(),
@@ -168,6 +171,36 @@ lc := goscade.NewLifecycle(logger,
     goscade.WithGraphOutput("graph.dot"),
 )
 ```
+
+### Errors and Shutdown
+
+`Lifecycle.Run` preserves the reason the lifecycle stopped:
+
+- canceling the input context returns its cause (`context.Canceled` or
+  `context.DeadlineExceeded`);
+- a component failure is wrapped with the component name;
+- a component that returns `nil` before shutdown returns
+  `UnexpectedCloseComponentError`;
+- shutdown exceeding its timeout returns `ShutdownTimeoutError`.
+
+Independent failures are combined with `errors.Join`, so inspect results with
+`errors.Is` instead of comparing error strings:
+
+```go
+err := lc.Run(ctx, nil)
+switch {
+case errors.Is(err, goscade.ShutdownTimeoutError):
+    log.Printf("shutdown timed out: %v", err)
+case errors.Is(err, context.Canceled):
+    log.Printf("shutdown requested: %v", err)
+case err != nil:
+    log.Printf("component failure: %v", err)
+}
+```
+
+Go cannot forcibly stop a goroutine. When shutdown times out, `Run` returns,
+but a component that ignores its context may continue until it returns or the
+process exits.
 
 ### Dependency Graph Export
 
