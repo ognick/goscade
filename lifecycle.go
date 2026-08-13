@@ -21,6 +21,10 @@ var (
 	// CascadeCloseComponentError is returned when a component is closed as part
 	// of a cascade shutdown initiated by another component's failure.
 	CascadeCloseComponentError = errors.New("cascade close component")
+
+	// ShutdownTimeoutError is returned when components do not stop before the
+	// configured shutdown timeout.
+	ShutdownTimeoutError = errors.New("shutdown timeout")
 )
 
 // logger defines the interface for logging within the lifecycle system.
@@ -88,6 +92,7 @@ type Lifecycle interface {
 	// The method handles dependency resolution, concurrent startup, and graceful shutdown.
 	// The readinessProbe callback is called when all components are ready or if there's an error during startup.
 	// By default, the lifecycle will not respond to system signals unless WithShutdownHook() option is used.
+	// Run panics if no components have been registered.
 	Run(ctx context.Context, readinessProbe func(err error)) error
 
 	// Status returns the current status of the lifecycle manager.
@@ -108,6 +113,7 @@ type lifecycle struct {
 	ignoreCircularDependency bool
 	shutdownHook             bool
 	startTimeout             time.Duration
+	shutdownTimeout          time.Duration
 	graphOutputFile          string
 }
 
@@ -142,6 +148,15 @@ func WithStartTimeout(timeout time.Duration) Option {
 	}
 }
 
+// WithShutdownTimeout sets the maximum time to wait for components to stop.
+// Default is 1 minute. Component goroutines cannot be forcibly terminated and
+// may continue running after Run returns.
+func WithShutdownTimeout(timeout time.Duration) Option {
+	return func(lc *lifecycle) {
+		lc.shutdownTimeout = timeout
+	}
+}
+
 // WithGraphOutput enables writing the dependency graph to a file in DOT format.
 // The file will be written when the lifecycle starts running.
 // Use Graphviz (e.g., dot -Tpng graph.dot -o graph.png) to visualize the output.
@@ -164,6 +179,7 @@ func NewLifecycle(log logger, opts ...Option) Lifecycle {
 		components:         make(map[Component]struct{}),
 		ptrToComp:          make(map[uintptr]Component),
 		startTimeout:       time.Minute, // Default 1 minute
+		shutdownTimeout:    time.Minute, // Default 1 minute
 	}
 
 	for _, opt := range opts {
@@ -336,10 +352,17 @@ func (lc *lifecycle) runComponent(
 			return err
 		}
 
-		err = comp.Run(state.runCtx, state.cancelProbe)
-		if err == nil {
-			lifecycleCtxCancel(UnexpectedCloseComponentError)
-		} else {
+		err = comp.Run(state.runCtx, func(err error) {
+			if err != nil {
+				err = fmt.Errorf("component %s readiness: %w", state.componentName, err)
+			}
+			state.cancelProbe(err)
+		})
+		if err == nil && lifecycleCtx.Err() == nil {
+			err = fmt.Errorf("component %s: %w", state.componentName, UnexpectedCloseComponentError)
+			lifecycleCtxCancel(err)
+		} else if err != nil {
+			err = fmt.Errorf("component %s: %w", state.componentName, err)
 			lifecycleCtxCancel(err)
 		}
 
@@ -370,12 +393,18 @@ func (lc *lifecycle) runComponent(
 // or if there's an error during startup.
 // By default, the lifecycle will not respond to system signals unless
 // WithShutdownHook() option is used during lifecycle creation.
+// Run panics if no components have been registered.
 func (lc *lifecycle) Run(ctx context.Context, readinessProbe func(err error)) error {
+	if len(lc.components) == 0 {
+		panic("goscade: lifecycle has no components")
+	}
+
 	// Graceful shutdown on context cancellation or signal
 	if lc.shutdownHook {
 		ctx, _ = signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	}
 	lifecycleCtx, lifecycleCtxCancel := context.WithCancelCause(ctx)
+	defer lifecycleCtxCancel(context.Canceled)
 	compToParents := lc.buildCompToParents()
 	compToChildren := lc.buildCompToChildren(compToParents)
 
@@ -451,7 +480,19 @@ func (lc *lifecycle) Run(ctx context.Context, readinessProbe func(err error)) er
 	lc.setStatus(ctx, LifecycleStatusRunning)
 	close(startLatch)
 
-	<-teardownCtx.Done()
-	lifecycleCtxCancel(context.Canceled)
-	return context.Cause(teardownCtx)
+	select {
+	case <-teardownCtx.Done():
+		lifecycleCtxCancel(context.Canceled)
+		return context.Cause(teardownCtx)
+	case <-lifecycleCtx.Done():
+	}
+
+	timer := time.NewTimer(lc.shutdownTimeout)
+	defer timer.Stop()
+	select {
+	case <-teardownCtx.Done():
+		return context.Cause(teardownCtx)
+	case <-timer.C:
+		return ShutdownTimeoutError
+	}
 }
