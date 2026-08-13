@@ -3,9 +3,8 @@
 <head>
     <meta charset="utf-8" />
     <title>Goscade Graph</title>
-    <script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
-    <script src="https://unpkg.com/cytoscape/dist/cytoscape.min.js"></script>
-    <script src="https://unpkg.com/cytoscape-dagre/cytoscape-dagre.js"></script>
+    <script src="https://unpkg.com/cytoscape@3.34.0/dist/cytoscape.min.js"></script>
+    <script src="https://unpkg.com/cytoscape-dagre@4.0.0/dist/cytoscape-dagre.js"></script>
     <style>
         body {
             margin: 0;
@@ -106,7 +105,6 @@
     <div style="color: #FF9800">● Stopping</div>
 </div>
 <script>
-    cytoscape.use(window.cytoscapeDagre);
     let cy = null;
     let selectedId = null;
     let lastGraphKey = '';

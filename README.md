@@ -194,6 +194,9 @@ lc := goscade.NewLifecycle(logger,
     
     // Set timeout for components to become ready
     goscade.WithStartTimeout(30 * time.Second),
+
+    // Set timeout for components to stop
+    goscade.WithShutdownTimeout(30 * time.Second),
     
     // Allow circular dependencies (use with caution)
     goscade.WithCircularDependency(),

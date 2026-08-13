@@ -294,35 +294,31 @@ func TestLifecycle_BuildCompToParents_And_Children(t *testing.T) {
 // Test: Run with no components
 func TestLifecycle_NoComponents(t *testing.T) {
 	lc := NewLifecycle(&mockLogger{})
-	catch := func() {
-		if r := recover(); r != nil {
-			t.Fatalf("unexpected panic: %v", r)
-		}
-	}
-	assert.NoError(t, runLifecycle(context.Background(), lc, catch))
+	assert.PanicsWithValue(t, "goscade: lifecycle has no components", func() {
+		_ = lc.Run(context.Background(), nil)
+	})
 }
 
 // Test: Correct status transitions
 func TestLifecycle_Status_Transitions(t *testing.T) {
 	lc := NewLifecycle(&mockLogger{})
 	lcImpl := lc.(*lifecycle)
-	ctx := context.Background()
 	if lc.Status() != LifecycleStatusIdle {
 		t.Errorf("expected status idle, got %s", lc.Status())
 	}
-	lcImpl.setStatus(ctx, LifecycleStatusRunning)
+	lcImpl.setStatus(LifecycleStatusRunning)
 	if lc.Status() != LifecycleStatusRunning {
 		t.Errorf("expected status running, got %s", lc.Status())
 	}
-	lcImpl.setStatus(ctx, LifecycleStatusReady)
+	lcImpl.setStatus(LifecycleStatusReady)
 	if lc.Status() != LifecycleStatusReady {
 		t.Errorf("expected status ready, got %s", lc.Status())
 	}
-	lcImpl.setStatus(ctx, LifecycleStatusStopping)
+	lcImpl.setStatus(LifecycleStatusStopping)
 	if lc.Status() != LifecycleStatusStopping {
 		t.Errorf("expected status stopping, got %s", lc.Status())
 	}
-	lcImpl.setStatus(ctx, LifecycleStatusStopped)
+	lcImpl.setStatus(LifecycleStatusStopped)
 	if lc.Status() != LifecycleStatusStopped {
 		t.Errorf("expected status stopped, got %s", lc.Status())
 	}
@@ -467,6 +463,30 @@ func (c *customComponent) delegateName() string {
 	return c.name
 }
 
+type failingNamedComponent struct {
+	name string
+	err  error
+}
+
+func (c *failingNamedComponent) Run(_ context.Context, readinessProbe func(error)) error {
+	readinessProbe(nil)
+	return c.err
+}
+
+func (c *failingNamedComponent) delegateName() string {
+	return c.name
+}
+
+func TestRunComponent_ErrorIncludesDelegateName(t *testing.T) {
+	wantErr := errors.New("database failed")
+	lc := NewLifecycle(&mockLogger{})
+	lc.Register(&failingNamedComponent{name: "database", err: wantErr})
+
+	err := lc.Run(context.Background(), nil)
+	assert.ErrorIs(t, err, wantErr)
+	assert.EqualError(t, err, "component database: database failed")
+}
+
 // Test: runComponent with delegateNameProvider
 func TestRunComponent_DelegateNameProvider(t *testing.T) {
 	lc := NewLifecycle(&mockLogger{})
@@ -518,7 +538,7 @@ func TestRunComponent_ParentDependencyFailure(t *testing.T) {
 	<-readinessProbe
 	// Wait for graceful shutdown
 	shutdownErr := errGroup.Wait()
-	assert.EqualError(t, shutdownErr, "component error")
+	assert.EqualError(t, shutdownErr, "component *goscade.errorComponent: component error")
 }
 
 // cascadeComponent causes cascade shutdown for testing
@@ -588,6 +608,7 @@ func TestRunComponent_ProbeError(t *testing.T) {
 	// Should get an error due to probe failure
 	err := <-readinessProbe
 	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "component *goscade.probeErrorComponent readiness")
 	assert.Contains(t, err.Error(), "probe error")
 
 	// Wait for graceful shutdown
@@ -629,7 +650,53 @@ func TestRunComponent_UnexpectedClose(t *testing.T) {
 
 	// Wait for graceful shutdown
 	shutdownErr := errGroup.Wait()
-	assert.Error(t, shutdownErr)
+	assert.ErrorIs(t, shutdownErr, UnexpectedCloseComponentError)
+	assert.Contains(t, shutdownErr.Error(), "component *goscade.unexpectedCloseComponent")
+}
+
+type stuckComponent struct {
+	release <-chan struct{}
+}
+
+func (c *stuckComponent) Run(_ context.Context, readinessProbe func(error)) error {
+	readinessProbe(nil)
+	<-c.release
+	return nil
+}
+
+func TestTimeout_ShutdownTimeout(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+
+	lc := NewLifecycle(&mockLogger{}, WithShutdownTimeout(50*time.Millisecond))
+	lc.Register(&stuckComponent{release: release})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ready := make(chan error)
+	done := make(chan error)
+	go func() {
+		done <- lc.Run(ctx, func(err error) { ready <- err })
+	}()
+
+	assert.NoError(t, <-ready)
+	cancel()
+	assert.ErrorIs(t, <-done, ShutdownTimeoutError)
+}
+
+func TestLifecycle_Run_WithShutdownHook(t *testing.T) {
+	lc := NewLifecycle(&mockLogger{}, WithShutdownHook())
+	lc.Register(&mockComponentCyclic{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ready := make(chan error)
+	done := make(chan error)
+	go func() {
+		done <- lc.Run(ctx, func(err error) { ready <- err })
+	}()
+
+	assert.NoError(t, <-ready)
+	cancel()
+	assert.ErrorIs(t, <-done, context.Canceled)
 }
 
 // slowStartComponent takes time to start for timeout testing
