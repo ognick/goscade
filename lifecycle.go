@@ -103,7 +103,6 @@ type Lifecycle interface {
 type lifecycle struct {
 	mu                 sync.RWMutex
 	status             LifecycleStatus
-	statusListener     chan LifecycleStatus
 	compToImplicitDeps map[Component]map[Component]struct{}
 	compToLinkedDeps   map[Component][]any
 	components         map[Component]struct{}
@@ -175,7 +174,6 @@ func NewLifecycle(log logger, opts ...Option) Lifecycle {
 		status:             LifecycleStatusIdle,
 		compToImplicitDeps: make(map[Component]map[Component]struct{}),
 		compToLinkedDeps:   make(map[Component][]any),
-		statusListener:     make(chan LifecycleStatus),
 		components:         make(map[Component]struct{}),
 		ptrToComp:          make(map[uintptr]Component),
 		startTimeout:       time.Minute, // Default 1 minute
@@ -225,7 +223,7 @@ func (lc *lifecycle) Link(comp Component, deps ...any) {
 // setStatus updates the lifecycle status with proper state transition validation.
 // It returns true if the status change was successful, false if the transition
 // is not allowed from the current state.
-func (lc *lifecycle) setStatus(ctx context.Context, newStatus LifecycleStatus) bool {
+func (lc *lifecycle) setStatus(newStatus LifecycleStatus) bool {
 	lc.mu.Lock()
 	defer lc.mu.Unlock()
 	switch newStatus {
@@ -238,13 +236,6 @@ func (lc *lifecycle) setStatus(ctx context.Context, newStatus LifecycleStatus) b
 			return false
 		}
 	}
-
-	go func() {
-		select {
-		case <-ctx.Done():
-		case lc.statusListener <- newStatus:
-		}
-	}()
 
 	lc.status = newStatus
 	return true
@@ -401,7 +392,9 @@ func (lc *lifecycle) Run(ctx context.Context, readinessProbe func(err error)) er
 
 	// Graceful shutdown on context cancellation or signal
 	if lc.shutdownHook {
-		ctx, _ = signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+		var stop context.CancelFunc
+		ctx, stop = signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
 	}
 	lifecycleCtx, lifecycleCtxCancel := context.WithCancelCause(ctx)
 	defer lifecycleCtxCancel(context.Canceled)
@@ -447,14 +440,14 @@ func (lc *lifecycle) Run(ctx context.Context, readinessProbe func(err error)) er
 		} else {
 			lc.log.Infof("All components are stopping")
 		}
-		lc.setStatus(ctx, LifecycleStatusStopping)
+		lc.setStatus(LifecycleStatusStopping)
 	}()
 
 	// Wait until all probes are done (either ready or failed)
 	go func() {
 		probeErr := prober.Wait()
 		if probeErr == nil || errors.Is(probeErr, context.Canceled) {
-			lc.setStatus(ctx, LifecycleStatusReady)
+			lc.setStatus(LifecycleStatusReady)
 			probeErr = nil
 		}
 
@@ -473,11 +466,11 @@ func (lc *lifecycle) Run(ctx context.Context, readinessProbe func(err error)) er
 			lc.log.Infof("All components are stopped")
 		}
 
-		lc.setStatus(ctx, LifecycleStatusStopped)
+		lc.setStatus(LifecycleStatusStopped)
 		cancelTeardown(err)
 	}()
 
-	lc.setStatus(ctx, LifecycleStatusRunning)
+	lc.setStatus(LifecycleStatusRunning)
 	close(startLatch)
 
 	select {
