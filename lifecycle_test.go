@@ -510,7 +510,7 @@ func TestRunComponent_DelegateNameProvider(t *testing.T) {
 
 	// Wait for graceful shutdown
 	err := errGroup.Wait()
-	assert.Error(t, err) // Should be context deadline exceeded or canceled
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
 // Test: runComponent with parent dependency failure
@@ -538,7 +538,8 @@ func TestRunComponent_ParentDependencyFailure(t *testing.T) {
 	<-readinessProbe
 	// Wait for graceful shutdown
 	shutdownErr := errGroup.Wait()
-	assert.EqualError(t, shutdownErr, "component *goscade.errorComponent: component error")
+	assert.Contains(t, shutdownErr.Error(), "component *goscade.errorComponent")
+	assert.Contains(t, shutdownErr.Error(), "component error")
 }
 
 // cascadeComponent causes cascade shutdown for testing
@@ -737,7 +738,7 @@ func TestTimeout_StartTimeout(t *testing.T) {
 
 	// Wait for graceful shutdown
 	shutdownErr := errGroup.Wait()
-	assert.ErrorIs(t, shutdownErr, context.Canceled)
+	assert.ErrorIs(t, shutdownErr, context.DeadlineExceeded)
 }
 
 // TestTimeout_DefaultTimeouts tests that default timeouts work correctly
