@@ -425,9 +425,6 @@ func TestWithGraphOutput_ErrorLogging(t *testing.T) {
 	logger := &errorCapturingLogger{}
 	lc := NewLifecycle(logger, WithGraphOutput("/invalid/readonly/path/graph.dot"))
 
-	a := &componentA{}
-	lc.Register(a)
-
 	// Run should trigger writeGraphToFile and log error
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Cancel immediately

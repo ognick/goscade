@@ -7,7 +7,6 @@ import (
 	"os/signal"
 	"reflect"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -15,6 +14,8 @@ import (
 )
 
 var (
+	componentReady = errors.New("component ready")
+
 	// UnexpectedCloseComponentError is returned when a component closes unexpectedly
 	// without being explicitly stopped by the lifecycle manager.
 	UnexpectedCloseComponentError = errors.New("unexpected close component")
@@ -242,7 +243,6 @@ func (lc *lifecycle) componentName(comp Component) string {
 // its contexts, cancellation functions, and synchronization primitives.
 type componentState struct {
 	componentName  string
-	started        atomic.Bool
 	probeCtx       context.Context
 	cancelProbe    context.CancelCauseFunc
 	runCtx         context.Context
@@ -281,7 +281,8 @@ func joinLifecycleErrors(primary error, componentErrs []error) error {
 		if err == nil || errors.Is(err, CascadeCloseComponentError) {
 			continue
 		}
-		if primary != nil && (errors.Is(err, primary) || errors.Is(primary, err)) {
+		if primary != nil && !errors.Is(err, ShutdownTimeoutError) &&
+			(errors.Is(err, primary) || errors.Is(primary, err)) {
 			continue
 		}
 		errs = append(errs, err)
@@ -299,6 +300,61 @@ func waitCtxErr(ctx context.Context) error {
 		return nil
 	}
 	return err
+}
+
+func waitProbeErr(ctx context.Context) error {
+	<-ctx.Done()
+	err := context.Cause(ctx)
+	if errors.Is(err, componentReady) {
+		return nil
+	}
+	return err
+}
+
+type joinedErrors interface {
+	Unwrap() []error
+}
+
+type wrappedError interface {
+	Unwrap() error
+}
+
+func removePropagatedCancellation(err error, runCtx context.Context) error {
+	independentErr, _ := prunePropagatedCancellation(err, runCtx)
+	return independentErr
+}
+
+func prunePropagatedCancellation(err error, runCtx context.Context) (error, bool) {
+	if err == nil || runCtx.Err() == nil {
+		return err, false
+	}
+	if joined, ok := err.(joinedErrors); ok {
+		independent := make([]error, 0, len(joined.Unwrap()))
+		removed := false
+		for _, childErr := range joined.Unwrap() {
+			var childRemoved bool
+			childErr, childRemoved = prunePropagatedCancellation(childErr, runCtx)
+			removed = removed || childRemoved
+			if childErr != nil {
+				independent = append(independent, childErr)
+			}
+		}
+		if !removed {
+			return err, false
+		}
+		return errors.Join(independent...), true
+	}
+	if wrapped, ok := err.(wrappedError); ok {
+		independent, removed := prunePropagatedCancellation(wrapped.Unwrap(), runCtx)
+		if !removed {
+			return err, false
+		}
+		return independent, true
+	}
+	if errors.Is(err, context.Cause(runCtx)) || errors.Is(err, runCtx.Err()) {
+		return nil, true
+	}
+	return err, false
 }
 
 // runComponent starts a component and manages its lifecycle including
@@ -333,11 +389,12 @@ func (lc *lifecycle) runComponent(
 		probeCtx, cancel := context.WithTimeout(state.probeCtx, lc.startTimeout)
 		defer cancel()
 
-		if err := waitCtxErr(probeCtx); err != nil {
-			if !state.started.Load() {
+		if err := waitProbeErr(probeCtx); err != nil {
+			if state.probeCtx.Err() != nil {
 				return err
 			}
 			probeErr := fmt.Errorf("component %s readiness: %w", state.componentName, err)
+			componentErrs.add(probeErr)
 			lc.log.Errorf("Component %s [PROB ERROR]: %v", state.componentName, err)
 			lifecycleCtxCancel(probeErr)
 			return probeErr
@@ -352,19 +409,22 @@ func (lc *lifecycle) runComponent(
 		<-startLatch
 
 		for parentComp := range compToParents[comp] {
-			if err := waitCtxErr(compStates[parentComp].probeCtx); err != nil {
+			if err := waitProbeErr(compStates[parentComp].probeCtx); err != nil {
 				state.cancelProbe(err)
 				state.cancelRun(err)
 				return err
 			}
 		}
 
-		state.started.Store(true)
 		err := comp.Run(state.runCtx, func(err error) {
-			state.cancelProbe(err)
-			if err != nil {
-				lifecycleCtxCancel(fmt.Errorf("component %s readiness: %w", state.componentName, err))
+			if err == nil {
+				state.cancelProbe(componentReady)
+				return
 			}
+			readinessErr := fmt.Errorf("component %s readiness: %w", state.componentName, err)
+			componentErrs.add(readinessErr)
+			lifecycleCtxCancel(readinessErr)
+			state.cancelProbe(readinessErr)
 		})
 		if err == nil {
 			if lifecycleCtx.Err() == nil {
@@ -373,10 +433,10 @@ func (lc *lifecycle) runComponent(
 				lifecycleCtxCancel(unexpectedErr)
 			}
 		} else {
-			propagated := state.runCtx.Err() != nil && errors.Is(err, context.Cause(state.runCtx))
-			duplicatePrimary := errors.Is(context.Cause(lifecycleCtx), err)
-			if !propagated && !duplicatePrimary && !errors.Is(err, CascadeCloseComponentError) {
-				componentErr := fmt.Errorf("component %s: %w", state.componentName, err)
+			independentErr := removePropagatedCancellation(err, state.runCtx)
+			duplicatePrimary := errors.Is(context.Cause(lifecycleCtx), independentErr)
+			if independentErr != nil && !duplicatePrimary && !errors.Is(independentErr, CascadeCloseComponentError) {
+				componentErr := fmt.Errorf("component %s: %w", state.componentName, independentErr)
 				componentErrs.add(componentErr)
 				lifecycleCtxCancel(componentErr)
 			}
@@ -484,7 +544,7 @@ func (lc *lifecycle) Run(ctx context.Context, readinessProbe func(err error)) er
 	// Wait until all probes are done (either ready or failed)
 	go func() {
 		probeErr := prober.Wait()
-		if probeErr == nil || errors.Is(probeErr, context.Canceled) {
+		if probeErr == nil {
 			lc.setStatus(LifecycleStatusReady)
 			probeErr = nil
 		} else if cause := context.Cause(lifecycleCtx); cause != nil {

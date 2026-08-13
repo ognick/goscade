@@ -670,7 +670,7 @@ func TestTimeout_StartTimeout(t *testing.T) {
 
 	// Wait for graceful shutdown
 	shutdownErr := errGroup.Wait()
-	assert.ErrorIs(t, shutdownErr, context.Canceled)
+	assert.ErrorIs(t, shutdownErr, context.DeadlineExceeded)
 }
 
 // TestTimeout_DefaultTimeouts tests that default timeouts work correctly

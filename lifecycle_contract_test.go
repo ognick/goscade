@@ -3,7 +3,9 @@ package goscade
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -172,6 +174,24 @@ func TestLifecycle_Run_ReadinessCauseNamesFailingComponent(t *testing.T) {
 	assert.Equal(t, "component database readiness: database is unavailable", runErr.Error())
 }
 
+func TestLifecycle_Run_ReadinessCanceledIsFailure(t *testing.T) {
+	readinessErr := fmt.Errorf("configuration aborted: %w", context.Canceled)
+	lc := NewLifecycle(&mockLogger{})
+	lc.Register(&namedContractComponent{name: "config", run: func(_ context.Context, probe func(error)) error {
+		probe(readinessErr)
+		return readinessErr
+	}})
+
+	ready, done := runContractLifecycle(lc, context.Background())
+	probeErr := receiveContractResult(t, ready)
+	runErr := receiveContractResult(t, done)
+
+	require.ErrorIs(t, probeErr, readinessErr)
+	assert.Equal(t, "component config readiness: configuration aborted: context canceled", probeErr.Error())
+	require.ErrorIs(t, runErr, readinessErr)
+	assert.Equal(t, "component config readiness: configuration aborted: context canceled", runErr.Error())
+}
+
 func TestLifecycle_Run_JoinsIndependentErrors(t *testing.T) {
 	firstErr := errors.New("first component failed")
 	secondErr := errors.New("second component failed")
@@ -197,6 +217,32 @@ func TestLifecycle_Run_JoinsIndependentErrors(t *testing.T) {
 	assert.Contains(t, runErr.Error(), "component *goscade.contractComponent")
 }
 
+func TestLifecycle_Run_JoinsIndependentReadinessErrors(t *testing.T) {
+	firstErr := errors.New("database is unavailable")
+	secondErr := errors.New("broker is unavailable")
+	var probed sync.WaitGroup
+	probed.Add(2)
+	lc := NewLifecycle(&mockLogger{})
+
+	for _, readinessErr := range []error{firstErr, secondErr} {
+		readinessErr := readinessErr
+		lc.Register(&contractComponent{run: func(_ context.Context, probe func(error)) error {
+			probe(readinessErr)
+			probed.Done()
+			probed.Wait()
+			return nil
+		}})
+	}
+
+	ready, done := runContractLifecycle(lc, context.Background())
+	probeErr := receiveContractResult(t, ready)
+	runErr := receiveContractResult(t, done)
+
+	assert.True(t, errors.Is(probeErr, firstErr) || errors.Is(probeErr, secondErr))
+	assert.ErrorIs(t, runErr, firstErr)
+	assert.ErrorIs(t, runErr, secondErr)
+}
+
 func TestLifecycle_Run_JoinsShutdownErrorWithInputCause(t *testing.T) {
 	cleanupErr := errors.New("flush failed")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -214,6 +260,26 @@ func TestLifecycle_Run_JoinsShutdownErrorWithInputCause(t *testing.T) {
 	runErr := receiveContractResult(t, done)
 	assert.ErrorIs(t, runErr, context.Canceled)
 	assert.ErrorIs(t, runErr, cleanupErr)
+}
+
+func TestLifecycle_Run_PreservesWrappedCleanupErrorContext(t *testing.T) {
+	cleanupErr := errors.New("flush failed")
+	ctx, cancel := context.WithCancel(context.Background())
+	lc := NewLifecycle(&mockLogger{})
+	lc.Register(&contractComponent{run: func(ctx context.Context, probe func(error)) error {
+		probe(nil)
+		<-ctx.Done()
+		return fmt.Errorf("flush users: %w", cleanupErr)
+	}})
+
+	ready, done := runContractLifecycle(lc, ctx)
+	require.NoError(t, receiveContractResult(t, ready))
+	cancel()
+
+	runErr := receiveContractResult(t, done)
+	assert.ErrorIs(t, runErr, context.Canceled)
+	assert.ErrorIs(t, runErr, cleanupErr)
+	assert.Contains(t, runErr.Error(), "flush users: flush failed")
 }
 
 func TestLifecycle_Run_DoesNotDuplicateCascadeCause(t *testing.T) {
@@ -240,6 +306,82 @@ func TestLifecycle_Run_DoesNotDuplicateCascadeCause(t *testing.T) {
 	assert.Equal(t, 1, strings.Count(runErr.Error(), componentErr.Error()))
 }
 
+func TestLifecycle_Run_DoesNotCollectCascadeContextCanceled(t *testing.T) {
+	componentErr := errors.New("database failed")
+	fail := make(chan struct{})
+	lc := NewLifecycle(&mockLogger{})
+	lc.Register(&contractComponent{run: func(_ context.Context, probe func(error)) error {
+		probe(nil)
+		<-fail
+		return componentErr
+	}})
+	lc.Register(&contractComponent{run: func(ctx context.Context, probe func(error)) error {
+		probe(nil)
+		<-ctx.Done()
+		return ctx.Err()
+	}})
+
+	ready, done := runContractLifecycle(lc, context.Background())
+	require.NoError(t, receiveContractResult(t, ready))
+	close(fail)
+
+	runErr := receiveContractResult(t, done)
+	assert.ErrorIs(t, runErr, componentErr)
+	assert.NotErrorIs(t, runErr, context.Canceled)
+}
+
+func TestLifecycle_Run_PreservesCleanupErrorJoinedWithCascadeCancellation(t *testing.T) {
+	componentErr := errors.New("database failed")
+	cleanupErr := errors.New("flush failed")
+	fail := make(chan struct{})
+	lc := NewLifecycle(&mockLogger{})
+	lc.Register(&contractComponent{run: func(_ context.Context, probe func(error)) error {
+		probe(nil)
+		<-fail
+		return componentErr
+	}})
+	lc.Register(&contractComponent{run: func(ctx context.Context, probe func(error)) error {
+		probe(nil)
+		<-ctx.Done()
+		return errors.Join(ctx.Err(), cleanupErr)
+	}})
+
+	ready, done := runContractLifecycle(lc, context.Background())
+	require.NoError(t, receiveContractResult(t, ready))
+	close(fail)
+
+	runErr := receiveContractResult(t, done)
+	assert.ErrorIs(t, runErr, componentErr)
+	assert.ErrorIs(t, runErr, cleanupErr)
+	assert.NotErrorIs(t, runErr, context.Canceled)
+}
+
+func TestLifecycle_Run_PreservesCleanupErrorInWrappedJoin(t *testing.T) {
+	componentErr := errors.New("database failed")
+	cleanupErr := errors.New("flush failed")
+	fail := make(chan struct{})
+	lc := NewLifecycle(&mockLogger{})
+	lc.Register(&contractComponent{run: func(_ context.Context, probe func(error)) error {
+		probe(nil)
+		<-fail
+		return componentErr
+	}})
+	lc.Register(&contractComponent{run: func(ctx context.Context, probe func(error)) error {
+		probe(nil)
+		<-ctx.Done()
+		return fmt.Errorf("shutdown failed: %w", errors.Join(ctx.Err(), cleanupErr))
+	}})
+
+	ready, done := runContractLifecycle(lc, context.Background())
+	require.NoError(t, receiveContractResult(t, ready))
+	close(fail)
+
+	runErr := receiveContractResult(t, done)
+	assert.ErrorIs(t, runErr, componentErr)
+	assert.ErrorIs(t, runErr, cleanupErr)
+	assert.NotErrorIs(t, runErr, context.Canceled)
+}
+
 func TestLifecycle_Run_Empty(t *testing.T) {
 	lc := NewLifecycle(&mockLogger{})
 	assert.NoError(t, lc.Run(context.Background(), nil))
@@ -264,6 +406,26 @@ func TestLifecycle_Run_ShutdownTimeout(t *testing.T) {
 	assert.ErrorIs(t, runErr, context.Canceled)
 	assert.ErrorIs(t, runErr, ShutdownTimeoutError)
 	assert.ErrorIs(t, runErr, context.DeadlineExceeded)
+}
+
+func TestLifecycle_Run_ShutdownTimeoutPreservesSentinelAfterInputDeadline(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	lc := NewLifecycle(&mockLogger{}, WithShutdownTimeout(20*time.Millisecond))
+	lc.Register(&contractComponent{run: func(_ context.Context, probe func(error)) error {
+		probe(nil)
+		<-release
+		return nil
+	}})
+
+	ready, done := runContractLifecycle(lc, ctx)
+	require.NoError(t, receiveContractResult(t, ready))
+
+	runErr := receiveContractResult(t, done)
+	assert.ErrorIs(t, runErr, context.DeadlineExceeded)
+	assert.ErrorIs(t, runErr, ShutdownTimeoutError)
 }
 
 func TestLifecycle_Run_ShutdownTimeoutJoinsPrimaryFailure(t *testing.T) {
