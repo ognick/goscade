@@ -473,12 +473,7 @@ func (lc *lifecycle) Run(ctx context.Context, readinessProbe func(err error)) er
 	lc.setStatus(LifecycleStatusRunning)
 	close(startLatch)
 
-	select {
-	case <-teardownCtx.Done():
-		lifecycleCtxCancel(context.Canceled)
-		return context.Cause(teardownCtx)
-	case <-lifecycleCtx.Done():
-	}
+	<-lifecycleCtx.Done()
 
 	timer := time.NewTimer(lc.shutdownTimeout)
 	defer timer.Stop()

@@ -683,6 +683,22 @@ func TestTimeout_ShutdownTimeout(t *testing.T) {
 	assert.ErrorIs(t, <-done, ShutdownTimeoutError)
 }
 
+func TestLifecycle_Run_WithShutdownHook(t *testing.T) {
+	lc := NewLifecycle(&mockLogger{}, WithShutdownHook())
+	lc.Register(&mockComponentCyclic{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ready := make(chan error)
+	done := make(chan error)
+	go func() {
+		done <- lc.Run(ctx, func(err error) { ready <- err })
+	}()
+
+	assert.NoError(t, <-ready)
+	cancel()
+	assert.ErrorIs(t, <-done, context.Canceled)
+}
+
 // slowStartComponent takes time to start for timeout testing
 type slowStartComponent struct {
 	delay time.Duration
