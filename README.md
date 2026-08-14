@@ -206,6 +206,19 @@ lc := goscade.NewLifecycle(logger,
 )
 ```
 
+### Errors
+
+`Lifecycle.Run` returns the cause that initiated shutdown together with any
+independent component and cleanup errors. Inspect the result with `errors.Is`;
+multiple failures may be joined with `errors.Join`.
+
+```go
+err := lc.Run(ctx, nil)
+if errors.Is(err, context.Canceled) {
+    // Shutdown was requested by the caller.
+}
+```
+
 ### Dependency Graph Export
 
 GOscade can export the component dependency graph in DOT format (Graphviz).

@@ -14,6 +14,8 @@ import (
 )
 
 var (
+	componentReady = errors.New("component ready")
+
 	// UnexpectedCloseComponentError is returned when a component closes unexpectedly
 	// without being explicitly stopped by the lifecycle manager.
 	UnexpectedCloseComponentError = errors.New("unexpected close component")
@@ -93,6 +95,7 @@ type Lifecycle interface {
 	// The readinessProbe callback is called when all components are ready or if there's an error during startup.
 	// By default, the lifecycle will not respond to system signals unless WithShutdownHook() option is used.
 	// Run panics if no components have been registered.
+	// The returned error joins the shutdown cause with independent component errors.
 	Run(ctx context.Context, readinessProbe func(err error)) error
 
 	// Status returns the current status of the lifecycle manager.
@@ -268,6 +271,69 @@ type componentState struct {
 	cancelTeardown context.CancelCauseFunc
 }
 
+type componentErrors struct {
+	mu   sync.Mutex
+	errs []error
+}
+
+func (e *componentErrors) add(err error) {
+	e.mu.Lock()
+	e.errs = append(e.errs, err)
+	e.mu.Unlock()
+}
+
+func (e *componentErrors) snapshot() []error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]error(nil), e.errs...)
+}
+
+func joinLifecycleErrors(errs ...error) error {
+	unique := make([]error, 0, len(errs))
+	for _, err := range errs {
+		if err == nil || errors.Is(err, CascadeCloseComponentError) {
+			continue
+		}
+		duplicate := false
+		for _, existing := range unique {
+			if errors.Is(err, existing) || errors.Is(existing, err) {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			unique = append(unique, err)
+		}
+	}
+	return errors.Join(unique...)
+}
+
+func removePropagatedCancellation(err error, runCtx context.Context) error {
+	if err == nil || runCtx.Err() == nil {
+		return err
+	}
+	if !errors.Is(err, runCtx.Err()) && !errors.Is(err, context.Cause(runCtx)) {
+		return err
+	}
+
+	switch err := err.(type) {
+	case interface{ Unwrap() []error }:
+		kept := make([]error, 0, len(err.Unwrap()))
+		for _, child := range err.Unwrap() {
+			if child = removePropagatedCancellation(child, runCtx); child != nil {
+				kept = append(kept, child)
+			}
+		}
+		return errors.Join(kept...)
+
+	case interface{ Unwrap() error }:
+		return removePropagatedCancellation(err.Unwrap(), runCtx)
+
+	default:
+		return nil
+	}
+}
+
 // waitCtxErr waits for a context to be done and returns the cause of cancellation.
 // If the context was canceled (not timed out), it returns nil.
 func waitCtxErr(ctx context.Context) error {
@@ -277,6 +343,14 @@ func waitCtxErr(ctx context.Context) error {
 		return nil
 	}
 	return err
+}
+
+func waitProbeErr(ctx context.Context) error {
+	<-ctx.Done()
+	if err := context.Cause(ctx); !errors.Is(err, componentReady) {
+		return err
+	}
+	return nil
 }
 
 // runComponent starts a component and manages its lifecycle including
@@ -291,20 +365,9 @@ func (lc *lifecycle) runComponent(
 	compToParents map[Component]map[Component]struct{},
 	compToChildren map[Component]map[Component]struct{},
 	startLatch chan struct{},
+	componentErrs *componentErrors,
 ) {
 	state := compStates[comp]
-	//  Wait until all parents have started successfully, or any of them has failed
-	waitAllParentProbes := make(chan error)
-	go func() {
-		for parentComp := range compToParents[comp] {
-			if err := waitCtxErr(compStates[parentComp].probeCtx); err != nil {
-				waitAllParentProbes <- err
-				break
-			}
-		}
-		waitAllParentProbes <- nil
-	}()
-
 	//  Wait until all children have finished successfully, or any of them has failed
 	go func() {
 		for childComp := range compToChildren[comp] {
@@ -322,10 +385,15 @@ func (lc *lifecycle) runComponent(
 		probeCtx, cancel := context.WithTimeout(state.probeCtx, lc.startTimeout)
 		defer cancel()
 
-		if err := waitCtxErr(probeCtx); err != nil {
+		if err := waitProbeErr(probeCtx); err != nil {
+			if state.probeCtx.Err() != nil {
+				return err
+			}
+			probeErr := fmt.Errorf("component %s readiness: %w", state.componentName, err)
+			componentErrs.add(probeErr)
 			lc.log.Errorf("Component %s [PROB ERROR]: %v", state.componentName, err)
-			lifecycleCtxCancel(CascadeCloseComponentError)
-			return err
+			lifecycleCtxCancel(probeErr)
+			return probeErr
 		}
 
 		lc.log.Infof("Component %s [READY]", state.componentName)
@@ -336,25 +404,36 @@ func (lc *lifecycle) runComponent(
 		defer state.cancelTeardown(runErr)
 		<-startLatch
 
-		err := <-waitAllParentProbes
-		if err != nil && !errors.Is(err, context.Canceled) {
-			state.cancelProbe(err)
-			state.cancelRun(err)
-			return err
+		for parentComp := range compToParents[comp] {
+			if err := waitProbeErr(compStates[parentComp].probeCtx); err != nil {
+				state.cancelProbe(err)
+				state.cancelRun(err)
+				return err
+			}
 		}
 
-		err = comp.Run(state.runCtx, func(err error) {
-			if err != nil {
-				err = fmt.Errorf("component %s readiness: %w", state.componentName, err)
+		err := comp.Run(state.runCtx, func(err error) {
+			if err == nil {
+				state.cancelProbe(componentReady)
+				return
 			}
-			state.cancelProbe(err)
+			probeErr := fmt.Errorf("component %s readiness: %w", state.componentName, err)
+			componentErrs.add(probeErr)
+			lifecycleCtxCancel(probeErr)
+			state.cancelProbe(probeErr)
 		})
 		if err == nil && lifecycleCtx.Err() == nil {
 			err = fmt.Errorf("component %s: %w", state.componentName, UnexpectedCloseComponentError)
+			componentErrs.add(err)
 			lifecycleCtxCancel(err)
 		} else if err != nil {
-			err = fmt.Errorf("component %s: %w", state.componentName, err)
-			lifecycleCtxCancel(err)
+			if independentErr := removePropagatedCancellation(err, state.runCtx); independentErr != nil {
+				if !errors.Is(context.Cause(lifecycleCtx), independentErr) {
+					componentErr := fmt.Errorf("component %s: %w", state.componentName, independentErr)
+					componentErrs.add(componentErr)
+					lifecycleCtxCancel(componentErr)
+				}
+			}
 		}
 
 		switch {
@@ -385,6 +464,7 @@ func (lc *lifecycle) runComponent(
 // By default, the lifecycle will not respond to system signals unless
 // WithShutdownHook() option is used during lifecycle creation.
 // Run panics if no components have been registered.
+// The returned error joins the shutdown cause with independent component errors.
 func (lc *lifecycle) Run(ctx context.Context, readinessProbe func(err error)) error {
 	if len(lc.components) == 0 {
 		panic("goscade: lifecycle has no components")
@@ -406,6 +486,7 @@ func (lc *lifecycle) Run(ctx context.Context, readinessProbe func(err error)) er
 	}
 	runner := &errgroup.Group{}
 	prober := &errgroup.Group{}
+	componentErrs := &componentErrors{}
 	startLatch := make(chan struct{})
 	compStates := make(map[Component]*componentState)
 	for comp := range lc.components {
@@ -430,6 +511,7 @@ func (lc *lifecycle) Run(ctx context.Context, readinessProbe func(err error)) er
 			compToParents,
 			compToChildren,
 			startLatch,
+			componentErrs,
 		)
 	}
 
@@ -446,9 +528,8 @@ func (lc *lifecycle) Run(ctx context.Context, readinessProbe func(err error)) er
 	// Wait until all probes are done (either ready or failed)
 	go func() {
 		probeErr := prober.Wait()
-		if probeErr == nil || errors.Is(probeErr, context.Canceled) {
+		if probeErr == nil {
 			lc.setStatus(LifecycleStatusReady)
-			probeErr = nil
 		}
 
 		if readinessProbe != nil {
@@ -475,12 +556,15 @@ func (lc *lifecycle) Run(ctx context.Context, readinessProbe func(err error)) er
 
 	<-lifecycleCtx.Done()
 
+	var timeoutErr error
 	timer := time.NewTimer(lc.shutdownTimeout)
 	defer timer.Stop()
 	select {
 	case <-teardownCtx.Done():
-		return context.Cause(teardownCtx)
 	case <-timer.C:
-		return ShutdownTimeoutError
+		timeoutErr = ShutdownTimeoutError
 	}
+
+	errs := append([]error{context.Cause(lifecycleCtx)}, componentErrs.snapshot()...)
+	return joinLifecycleErrors(append(errs, timeoutErr)...)
 }
