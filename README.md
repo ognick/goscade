@@ -88,7 +88,7 @@ func main() {
 }
 ```
 
-### Dependency Injection
+### Dependency Discovery
 
 GOscade automatically detects dependencies between registered components if they are **struct pointers** or **interfaces**.
 
