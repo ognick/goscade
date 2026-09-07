@@ -4,6 +4,9 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/ognick/goscade/v2.svg)](https://pkg.go.dev/github.com/ognick/goscade/v2)
 [![Go Report Card](https://goreportcard.com/badge/github.com/ognick/goscade)](https://goreportcard.com/report/github.com/ognick/goscade)
 [![codecov](https://codecov.io/gh/ognick/goscade/branch/main/graph/badge.svg)](https://codecov.io/gh/ognick/goscade)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/ognick/goscade?style=flat-square)](https://github.com/ognick/goscade/blob/main/go.mod)
+[![Latest Release](https://img.shields.io/github/v/release/ognick/goscade?sort=semver&style=flat-square)](https://github.com/ognick/goscade/releases/latest)
+[![Mentioned in Awesome Go](https://awesome.re/mentioned-badge.svg)](https://github.com/avelino/awesome-go)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](https://opensource.org/licenses/MIT)
 
 GOscade is a library for managing the lifecycle and dependencies of concurrent components in Go.
