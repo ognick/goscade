@@ -9,7 +9,16 @@
 [![Mentioned in Awesome Go](https://awesome.re/mentioned-badge.svg)](https://github.com/avelino/awesome-go)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](https://opensource.org/licenses/MIT)
 
-GOscade is a library for managing the lifecycle and dependencies of concurrent components in Go.
+GOscade is a lightweight lifecycle orchestrator for Go applications.
+
+It coordinates startup, readiness, failure propagation, and graceful shutdown
+of dependent components.
+
+- Dependency-aware startup
+- Readiness coordination
+- Failure propagation
+- Graceful shutdown in reverse dependency order
+- Automatic dependency graph discovery
 
 ## Installation
 
