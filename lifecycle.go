@@ -109,8 +109,12 @@ type lifecycle struct {
 	compToImplicitDeps map[Component]map[Component]struct{}
 	compToLinkedDeps   map[Component][]any
 	components         map[Component]struct{}
-	ptrToComp          map[uintptr]Component
-	log                logger
+	ptrToComp          map[ptrKey]Component
+	// compElemTypes holds T for every registered component of type *T.
+	compElemTypes map[reflect.Type]struct{}
+	// types caches type-level traversal facts; see typeFacts.
+	types *typeFacts
+	log   logger
 
 	ignoreCircularDependency bool
 	shutdownHook             bool
@@ -178,7 +182,9 @@ func NewLifecycle(log logger, opts ...Option) Lifecycle {
 		compToImplicitDeps: make(map[Component]map[Component]struct{}),
 		compToLinkedDeps:   make(map[Component][]any),
 		components:         make(map[Component]struct{}),
-		ptrToComp:          make(map[uintptr]Component),
+		ptrToComp:          make(map[ptrKey]Component),
+		compElemTypes:      make(map[reflect.Type]struct{}),
+		types:              &typeFacts{},
 		startTimeout:       time.Minute, // Default 1 minute
 		shutdownTimeout:    time.Minute, // Default 1 minute
 	}
@@ -203,7 +209,15 @@ func (lc *lifecycle) Register(comp Component, implicitDeps ...Component) {
 		}
 
 		lc.components[comp] = struct{}{}
-		lc.ptrToComp[val.Pointer()] = comp
+		lc.ptrToComp[ptrKeyOf(val)] = comp
+		if elem := val.Type().Elem(); elem.Kind() == reflect.Struct {
+			if _, known := lc.compElemTypes[elem]; !known {
+				// A new component type changes which types are worth
+				// walking, so cached facts are no longer valid.
+				lc.compElemTypes[elem] = struct{}{}
+				lc.types = &typeFacts{}
+			}
+		}
 		lc.compToImplicitDeps[comp] = make(map[Component]struct{})
 	}
 

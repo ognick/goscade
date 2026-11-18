@@ -265,8 +265,8 @@ func TestLifecycle_Dependencies_WithDeps(t *testing.T) {
 	lc.Register(compA)
 	lc.Register(compB)
 	lcImpl := lc.(*lifecycle)
-	lcImpl.ptrToComp[reflect.ValueOf(compA).Pointer()] = compA
-	lcImpl.ptrToComp[reflect.ValueOf(compB).Pointer()] = compB
+	lcImpl.ptrToComp[ptrKeyOf(reflect.ValueOf(compA))] = compA
+	lcImpl.ptrToComp[ptrKeyOf(reflect.ValueOf(compB))] = compB
 	deps := lc.Dependencies()
 	if len(deps) != 2 {
 		t.Errorf("expected 2 components, got %d", len(deps))
@@ -330,7 +330,7 @@ func TestLifecycle_Run_GracefulShutdown(t *testing.T) {
 	comp := &mockComponentCyclic{}
 	lc.Register(comp)
 	lcImpl := lc.(*lifecycle)
-	lcImpl.ptrToComp[reflect.ValueOf(comp).Pointer()] = comp
+	lcImpl.ptrToComp[ptrKeyOf(reflect.ValueOf(comp))] = comp
 	cancelCtx, cancel := context.WithCancel(context.Background())
 
 	// Start components
