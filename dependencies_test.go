@@ -247,7 +247,7 @@ func TestFindParentComponents_Pointer(t *testing.T) {
 	lc := newTestLifecycle()
 
 	comp := &mockComponent{name: "test"}
-	lc.ptrToComp[reflect.ValueOf(comp).Pointer()] = comp
+	lc.ptrToComp[ptrKeyOf(reflect.ValueOf(comp))] = comp
 
 	parents := lc.findParentComponents(comp)
 	if len(parents) != 0 {
@@ -260,7 +260,7 @@ func TestFindParentComponents_Struct(t *testing.T) {
 	lc := newTestLifecycle()
 
 	comp := &mockComponent{name: "test"}
-	lc.ptrToComp[reflect.ValueOf(comp).Pointer()] = comp
+	lc.ptrToComp[ptrKeyOf(reflect.ValueOf(comp))] = comp
 
 	testStruct := &TestStruct{Dep1: comp}
 	parents := lc.findParentComponents(testStruct)
@@ -275,8 +275,8 @@ func TestFindParentComponents_IgnoreTag(t *testing.T) {
 
 	dep1 := &mockComponent{name: "dep1"}
 	dep2 := &mockComponent{name: "dep2"}
-	lc.ptrToComp[reflect.ValueOf(dep1).Pointer()] = dep1
-	lc.ptrToComp[reflect.ValueOf(dep2).Pointer()] = dep2
+	lc.ptrToComp[ptrKeyOf(reflect.ValueOf(dep1))] = dep1
+	lc.ptrToComp[ptrKeyOf(reflect.ValueOf(dep2))] = dep2
 
 	testStruct := &IgnoreTagStruct{Dep1: dep1, Dep2: dep2}
 	parents := lc.findParentComponents(testStruct)
@@ -337,7 +337,7 @@ func TestFindParentComponents_Slice(t *testing.T) {
 	lc := newTestLifecycle()
 
 	comp := &mockComponent{name: "test"}
-	lc.ptrToComp[reflect.ValueOf(comp).Pointer()] = comp
+	lc.ptrToComp[ptrKeyOf(reflect.ValueOf(comp))] = comp
 
 	slice := &sliceMockComponent{arr: []*mockComponent{comp}}
 	parents := lc.findParentComponents(slice)
@@ -356,7 +356,7 @@ func TestFindParentComponents_Array(t *testing.T) {
 	lc := newTestLifecycle()
 
 	comp := &mockComponent{name: "test"}
-	lc.ptrToComp[reflect.ValueOf(comp).Pointer()] = comp
+	lc.ptrToComp[ptrKeyOf(reflect.ValueOf(comp))] = comp
 
 	array := &arrayMockComponent{arr: [1]*mockComponent{comp}}
 	parents := lc.findParentComponents(array)
@@ -375,7 +375,7 @@ func TestFindParentComponents_Map(t *testing.T) {
 	lc := newTestLifecycle()
 
 	comp := &mockComponent{name: "test"}
-	lc.ptrToComp[reflect.ValueOf(comp).Pointer()] = comp
+	lc.ptrToComp[ptrKeyOf(reflect.ValueOf(comp))] = comp
 
 	m := &mapMockComponent{m: map[string]*mockComponent{"test": comp}}
 	parents := lc.findParentComponents(m)
@@ -389,7 +389,7 @@ func TestFindParentComponents_NestedStruct(t *testing.T) {
 	lc := newTestLifecycle()
 
 	comp := &mockComponent{name: "test"}
-	lc.ptrToComp[reflect.ValueOf(comp).Pointer()] = comp
+	lc.ptrToComp[ptrKeyOf(reflect.ValueOf(comp))] = comp
 
 	type InnerStruct struct {
 		Comp *mockComponent
@@ -416,8 +416,8 @@ func TestFindParentComponents_MultipleDeps(t *testing.T) {
 
 	comp1 := &mockComponent{name: "test1"}
 	comp2 := &mockComponent{name: "test2"}
-	lc.ptrToComp[reflect.ValueOf(comp1).Pointer()] = comp1
-	lc.ptrToComp[reflect.ValueOf(comp2).Pointer()] = comp2
+	lc.ptrToComp[ptrKeyOf(reflect.ValueOf(comp1))] = comp1
+	lc.ptrToComp[ptrKeyOf(reflect.ValueOf(comp2))] = comp2
 
 	testStruct := &TestStruct{Dep1: comp1, Dep2: comp2}
 	parents := lc.findParentComponents(testStruct)
@@ -433,7 +433,7 @@ func TestDependencies_WithDeps(t *testing.T) {
 	comp2 := &mockComponent{name: "test2"}
 	lc.Register(comp1)
 	lc.Register(comp2)
-	lc.ptrToComp[reflect.ValueOf(comp1).Pointer()] = comp1
+	lc.ptrToComp[ptrKeyOf(reflect.ValueOf(comp1))] = comp1
 	testStruct := &TestStruct{Dep1: comp1}
 	lc.Register(testStruct)
 	deps := lc.Dependencies()
@@ -452,7 +452,7 @@ func TestBuildCompToParents_WithDeps(t *testing.T) {
 	comp2 := &mockComponent{name: "test2"}
 	lc.Register(comp1)
 	lc.Register(comp2)
-	lc.ptrToComp[reflect.ValueOf(comp1).Pointer()] = comp1
+	lc.ptrToComp[ptrKeyOf(reflect.ValueOf(comp1))] = comp1
 	testStruct := &TestStruct{Dep1: comp1}
 	lc.Register(testStruct)
 	parents := lc.buildCompToParents()
@@ -471,7 +471,7 @@ func TestBuildCompToChildren_WithDeps(t *testing.T) {
 	comp2 := &mockComponent{name: "test2"}
 	lc.Register(comp1)
 	lc.Register(comp2)
-	lc.ptrToComp[reflect.ValueOf(comp1).Pointer()] = comp1
+	lc.ptrToComp[ptrKeyOf(reflect.ValueOf(comp1))] = comp1
 	testStruct := &TestStruct{Dep1: comp1}
 	lc.Register(testStruct)
 	parents := lc.buildCompToParents()
@@ -512,9 +512,9 @@ func TestDependencies_ComplexGraph(t *testing.T) {
 	lc.Register(comp1)
 	lc.Register(comp2)
 	lc.Register(comp3)
-	lc.ptrToComp[reflect.ValueOf(comp1).Pointer()] = comp1
-	lc.ptrToComp[reflect.ValueOf(comp2).Pointer()] = comp2
-	lc.ptrToComp[reflect.ValueOf(comp3).Pointer()] = comp3
+	lc.ptrToComp[ptrKeyOf(reflect.ValueOf(comp1))] = comp1
+	lc.ptrToComp[ptrKeyOf(reflect.ValueOf(comp2))] = comp2
+	lc.ptrToComp[ptrKeyOf(reflect.ValueOf(comp3))] = comp3
 	// Create complex dependency structure
 	complex := &ComplexStruct{
 		Dep1: comp1,

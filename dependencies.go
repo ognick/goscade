@@ -6,9 +6,33 @@ import (
 	"sync"
 )
 
+// ptrKey identifies a pointer by its static type and address. The address
+// alone is not enough: a pointer to a struct and a pointer to its first field
+// are equal as numbers but point to different things.
+type ptrKey struct {
+	typ  reflect.Type
+	addr uintptr
+}
+
+// ptrKeyOf returns the key of a pointer value.
+func ptrKeyOf(val reflect.Value) ptrKey {
+	return ptrKey{typ: val.Type(), addr: val.Pointer()}
+}
+
+// containerKey identifies a map or a slice that has already been walked, so a
+// container that (indirectly) contains itself is not walked forever.
+type containerKey struct {
+	typ  reflect.Type
+	addr uintptr
+	len  int
+}
+
 // findParentComponents performs a breadth-first search traversal of a component's structure
 // to find all parent components it depends on. It uses reflection to examine fields,
 // slices, arrays, maps, and nested structures.
+//
+// Values whose type can never lead to a component (see lifecycle.traversable) are
+// skipped as a whole instead of being walked element by element.
 //
 // Parameters:
 //   - root: Component to examine
@@ -16,74 +40,236 @@ import (
 // Returns:
 //   - parents: map to collect found parent components
 func (lc *lifecycle) findParentComponents(root Component) map[Component]struct{} {
-	visited := make(map[uintptr]struct{})
+	visited := make(map[ptrKey]struct{})
+	visitedContainers := make(map[containerKey]struct{})
 	queue := fifoQueue[reflect.Value]{}
-	queue.Push(reflect.ValueOf(root))
 	parents := make(map[Component]struct{})
 	for dep := range lc.compToImplicitDeps[root] {
 		parents[dep] = struct{}{}
 	}
 
+	// The root itself is never its own parent.
+	var rootKey ptrKey
+	if rootVal := reflect.ValueOf(root); rootVal.IsValid() {
+		if rootVal.Kind() == reflect.Pointer {
+			rootKey = ptrKeyOf(rootVal)
+		}
+		queue.Push(rootVal)
+	}
+
 	// Explicit struct deps (from Link) are seeded as extra traversal roots so
-	// the BFS below walks them exactly as if they were fields of root. They are
-	// pushed AFTER root's own value, so the self-skip logic still excludes root.
+	// the BFS below walks them exactly as if they were fields of root.
 	for _, dep := range lc.compToLinkedDeps[root] {
 		queue.Push(reflect.ValueOf(dep))
 	}
 
-	var initialized bool
+	// parentAt records the component registered under key, if there is one.
+	parentAt := func(key ptrKey) bool {
+		if key == rootKey {
+			return false
+		}
+		comp, ok := lc.ptrToComp[key]
+		if ok {
+			parents[comp] = struct{}{}
+		}
+		return ok
+	}
+
 	for !queue.IsEmpty() {
 		val, _ := queue.Pop()
 		if val.Kind() == reflect.Interface {
 			val = val.Elem()
 		}
 
-		if val.Kind() == reflect.Pointer {
-			ptr := val.Pointer()
-			if _, seen := visited[ptr]; seen {
-				continue
-			}
-
-			visited[ptr] = struct{}{}
-			if initialized {
-				if comp, ok := lc.ptrToComp[ptr]; ok {
-					parents[comp] = struct{}{}
-					continue
-				}
-			}
-			initialized = true
+		// One type-level check covers every kind: nil interfaces, scalars,
+		// and containers that hold nothing but scalars stop here.
+		if !val.IsValid() || !lc.traversable(val.Type()) {
+			continue
 		}
 
 		switch val.Kind() {
+		case reflect.Pointer:
+			if val.IsNil() {
+				continue
+			}
+
+			key := ptrKeyOf(val)
+			if _, seen := visited[key]; seen {
+				continue
+			}
+
+			visited[key] = struct{}{}
+			if parentAt(key) {
+				continue
+			}
+
+			queue.Push(val.Elem())
+
 		case reflect.Struct:
-			t := val.Type()
-			for i := 0; i < val.NumField(); i++ {
-				if t.Field(i).Tag.Get("goscade") == "ignore" {
+			// A component stored by value is found by its address.
+			if val.CanAddr() {
+				key := ptrKey{typ: reflect.PointerTo(val.Type()), addr: val.UnsafeAddr()}
+				if parentAt(key) {
 					continue
 				}
+			}
+
+			for _, i := range lc.traversableFields(val.Type()) {
 				queue.Push(val.Field(i))
 			}
 
-		case reflect.Interface, reflect.Pointer:
-			queue.Push(val.Elem())
+		case reflect.Array:
+			for i := 0; i < val.Len(); i++ {
+				queue.Push(val.Index(i))
+			}
 
-		case reflect.Slice, reflect.Array:
+		case reflect.Slice:
+			if val.Len() == 0 {
+				continue
+			}
+
+			key := containerKey{typ: val.Type(), addr: val.Pointer(), len: val.Len()}
+			if _, seen := visitedContainers[key]; seen {
+				continue
+			}
+
+			visitedContainers[key] = struct{}{}
 			for i := 0; i < val.Len(); i++ {
 				queue.Push(val.Index(i))
 			}
 
 		case reflect.Map:
+			if val.Len() == 0 {
+				continue
+			}
+
+			key := containerKey{typ: val.Type(), addr: val.Pointer()}
+			if _, seen := visitedContainers[key]; seen {
+				continue
+			}
+
+			visitedContainers[key] = struct{}{}
+			t := val.Type()
+			walkKeys, walkElems := lc.traversable(t.Key()), lc.traversable(t.Elem())
 			iter := val.MapRange()
 			for iter.Next() {
-				queue.Push(iter.Key())
-				queue.Push(iter.Value())
+				if walkKeys {
+					queue.Push(iter.Key())
+				}
+				if walkElems {
+					queue.Push(iter.Value())
+				}
 			}
-		default:
-			continue
 		}
 	}
 
 	return parents
+}
+
+// ignoredField reports whether a struct field is excluded from dependency
+// detection with the `goscade:"ignore"` tag.
+func ignoredField(f reflect.StructField) bool {
+	return f.Tag.Get("goscade") == "ignore"
+}
+
+// typeFacts caches what the traversal knows about types. The facts depend on
+// which component types are registered, so they belong to one lifecycle and
+// are dropped whenever a new component type is registered. The caches only
+// grow with the number of distinct types met, which is bounded by the program.
+type typeFacts struct {
+	traversable sync.Map // map[reflect.Type]bool
+	fields      sync.Map // map[reflect.Type][]int
+}
+
+// traversable reports whether the BFS in findParentComponents can reach a
+// component through a value of type t, i.e. whether t is, or contains, a
+// pointer, an interface, or a registered component stored by value.
+//
+// Types made only of scalars (bytes, ints, strings, ...) are not traversable,
+// so arrays, slices, maps and struct fields of such types are skipped as a
+// whole. Channels, functions and unsafe pointers are not traversable either:
+// they do hold pointers, but the BFS does not look inside them.
+func (lc *lifecycle) traversable(t reflect.Type) bool {
+	if v, ok := lc.types.traversable.Load(t); ok {
+		return v.(bool)
+	}
+
+	seen := make(map[reflect.Type]struct{})
+	res := lc.reachesComponent(t, seen)
+	if res {
+		lc.types.traversable.Store(t, true)
+		return true
+	}
+
+	// Nothing reachable from t can lead to a component, so the same holds
+	// for every type met on the way.
+	for s := range seen {
+		lc.types.traversable.Store(s, false)
+	}
+
+	return false
+}
+
+// reachesComponent walks the type graph below t looking for a type that can
+// lead to a component. Types already in seen are not entered again: that is
+// what keeps self-referential types such as
+// `type Node struct{ Children []Node }` from recursing forever, and it is safe
+// because a type in seen either is still being examined or has already been
+// found to lead nowhere.
+func (lc *lifecycle) reachesComponent(t reflect.Type, seen map[reflect.Type]struct{}) bool {
+	if v, ok := lc.types.traversable.Load(t); ok {
+		return v.(bool)
+	}
+
+	if _, ok := seen[t]; ok {
+		return false
+	}
+
+	seen[t] = struct{}{}
+	switch t.Kind() {
+	case reflect.Pointer, reflect.Interface:
+		return true
+	case reflect.Array:
+		return t.Len() > 0 && lc.reachesComponent(t.Elem(), seen)
+	case reflect.Slice:
+		return lc.reachesComponent(t.Elem(), seen)
+	case reflect.Map:
+		return lc.reachesComponent(t.Key(), seen) || lc.reachesComponent(t.Elem(), seen)
+	case reflect.Struct:
+		// A registered component may be stored by value.
+		if _, ok := lc.compElemTypes[t]; ok {
+			return true
+		}
+
+		for i := 0; i < t.NumField(); i++ {
+			f := t.Field(i)
+			if !ignoredField(f) && lc.reachesComponent(f.Type, seen) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// traversableFields returns the indices of the fields of struct type t that
+// the BFS has to walk: not ignored by tag and of a traversable type. The list
+// is computed once per type.
+func (lc *lifecycle) traversableFields(t reflect.Type) []int {
+	if v, ok := lc.types.fields.Load(t); ok {
+		return v.([]int)
+	}
+
+	var fields []int
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !ignoredField(f) && lc.traversable(f.Type) {
+			fields = append(fields, i)
+		}
+	}
+
+	lc.types.fields.Store(t, fields)
+	return fields
 }
 
 // findCircularDependencies finds and optionally removes components that are part of circular
