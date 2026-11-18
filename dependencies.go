@@ -40,130 +40,155 @@ type containerKey struct {
 // Returns:
 //   - parents: map to collect found parent components
 func (lc *lifecycle) findParentComponents(root Component) map[Component]struct{} {
-	visited := make(map[ptrKey]struct{})
-	visitedContainers := make(map[containerKey]struct{})
-	queue := fifoQueue[reflect.Value]{}
-	parents := make(map[Component]struct{})
+	w := parentWalk{
+		lc:                lc,
+		visited:           make(map[ptrKey]struct{}),
+		visitedContainers: make(map[containerKey]struct{}),
+		parents:           make(map[Component]struct{}),
+	}
 	for dep := range lc.compToImplicitDeps[root] {
-		parents[dep] = struct{}{}
+		w.parents[dep] = struct{}{}
 	}
 
 	// The root itself is never its own parent.
-	var rootKey ptrKey
 	if rootVal := reflect.ValueOf(root); rootVal.IsValid() {
 		if rootVal.Kind() == reflect.Pointer {
-			rootKey = ptrKeyOf(rootVal)
+			w.rootKey = ptrKeyOf(rootVal)
 		}
-		queue.Push(rootVal)
+		w.queue.Push(rootVal)
 	}
 
 	// Explicit struct deps (from Link) are seeded as extra traversal roots so
 	// the BFS below walks them exactly as if they were fields of root.
 	for _, dep := range lc.compToLinkedDeps[root] {
-		queue.Push(reflect.ValueOf(dep))
+		w.queue.Push(reflect.ValueOf(dep))
 	}
 
-	// parentAt records the component registered under key, if there is one.
-	parentAt := func(key ptrKey) bool {
-		if key == rootKey {
-			return false
-		}
-		comp, ok := lc.ptrToComp[key]
-		if ok {
-			parents[comp] = struct{}{}
-		}
-		return ok
+	for !w.queue.IsEmpty() {
+		val, _ := w.queue.Pop()
+		w.visit(val)
 	}
 
-	for !queue.IsEmpty() {
-		val, _ := queue.Pop()
-		if val.Kind() == reflect.Interface {
-			val = val.Elem()
+	return w.parents
+}
+
+// parentWalk is the state of one findParentComponents traversal.
+type parentWalk struct {
+	lc                *lifecycle
+	rootKey           ptrKey
+	queue             fifoQueue[reflect.Value]
+	visited           map[ptrKey]struct{}
+	visitedContainers map[containerKey]struct{}
+	parents           map[Component]struct{}
+}
+
+// parentAt records the component registered under key, if there is one.
+func (w *parentWalk) parentAt(key ptrKey) bool {
+	if key == w.rootKey {
+		return false
+	}
+
+	comp, ok := w.lc.ptrToComp[key]
+	if ok {
+		w.parents[comp] = struct{}{}
+	}
+
+	return ok
+}
+
+// firstVisit marks a map or a slice as walked and reports whether it was new.
+func (w *parentWalk) firstVisit(key containerKey) bool {
+	if _, seen := w.visitedContainers[key]; seen {
+		return false
+	}
+
+	w.visitedContainers[key] = struct{}{}
+	return true
+}
+
+// visit examines one value and queues whatever is worth walking inside it.
+func (w *parentWalk) visit(val reflect.Value) {
+	if val.Kind() == reflect.Interface {
+		val = val.Elem()
+	}
+
+	// One type-level check covers every kind: nil interfaces, scalars,
+	// and containers that hold nothing but scalars stop here.
+	if !val.IsValid() || !w.lc.traversable(val.Type()) {
+		return
+	}
+
+	switch val.Kind() {
+	case reflect.Pointer:
+		w.visitPointer(val)
+	case reflect.Struct:
+		w.visitStruct(val)
+	case reflect.Array:
+		w.pushElems(val)
+	case reflect.Slice:
+		key := containerKey{typ: val.Type(), addr: val.Pointer(), len: val.Len()}
+		if val.Len() > 0 && w.firstVisit(key) {
+			w.pushElems(val)
 		}
-
-		// One type-level check covers every kind: nil interfaces, scalars,
-		// and containers that hold nothing but scalars stop here.
-		if !val.IsValid() || !lc.traversable(val.Type()) {
-			continue
+	case reflect.Map:
+		key := containerKey{typ: val.Type(), addr: val.Pointer()}
+		if val.Len() > 0 && w.firstVisit(key) {
+			w.pushEntries(val)
 		}
+	}
+}
 
-		switch val.Kind() {
-		case reflect.Pointer:
-			if val.IsNil() {
-				continue
-			}
+func (w *parentWalk) visitPointer(val reflect.Value) {
+	if val.IsNil() {
+		return
+	}
 
-			key := ptrKeyOf(val)
-			if _, seen := visited[key]; seen {
-				continue
-			}
+	key := ptrKeyOf(val)
+	if _, seen := w.visited[key]; seen {
+		return
+	}
 
-			visited[key] = struct{}{}
-			if parentAt(key) {
-				continue
-			}
+	w.visited[key] = struct{}{}
+	if !w.parentAt(key) {
+		w.queue.Push(val.Elem())
+	}
+}
 
-			queue.Push(val.Elem())
-
-		case reflect.Struct:
-			// A component stored by value is found by its address.
-			if val.CanAddr() {
-				key := ptrKey{typ: reflect.PointerTo(val.Type()), addr: val.UnsafeAddr()}
-				if parentAt(key) {
-					continue
-				}
-			}
-
-			for _, i := range lc.traversableFields(val.Type()) {
-				queue.Push(val.Field(i))
-			}
-
-		case reflect.Array:
-			for i := 0; i < val.Len(); i++ {
-				queue.Push(val.Index(i))
-			}
-
-		case reflect.Slice:
-			if val.Len() == 0 {
-				continue
-			}
-
-			key := containerKey{typ: val.Type(), addr: val.Pointer(), len: val.Len()}
-			if _, seen := visitedContainers[key]; seen {
-				continue
-			}
-
-			visitedContainers[key] = struct{}{}
-			for i := 0; i < val.Len(); i++ {
-				queue.Push(val.Index(i))
-			}
-
-		case reflect.Map:
-			if val.Len() == 0 {
-				continue
-			}
-
-			key := containerKey{typ: val.Type(), addr: val.Pointer()}
-			if _, seen := visitedContainers[key]; seen {
-				continue
-			}
-
-			visitedContainers[key] = struct{}{}
-			t := val.Type()
-			walkKeys, walkElems := lc.traversable(t.Key()), lc.traversable(t.Elem())
-			iter := val.MapRange()
-			for iter.Next() {
-				if walkKeys {
-					queue.Push(iter.Key())
-				}
-				if walkElems {
-					queue.Push(iter.Value())
-				}
-			}
+func (w *parentWalk) visitStruct(val reflect.Value) {
+	// A component stored by value is found by its address.
+	if val.CanAddr() {
+		key := ptrKey{typ: reflect.PointerTo(val.Type()), addr: val.UnsafeAddr()}
+		if w.parentAt(key) {
+			return
 		}
 	}
 
-	return parents
+	for _, i := range w.lc.traversableFields(val.Type()) {
+		w.queue.Push(val.Field(i))
+	}
+}
+
+// pushElems queues every element of an array or a slice.
+func (w *parentWalk) pushElems(val reflect.Value) {
+	for i := 0; i < val.Len(); i++ {
+		w.queue.Push(val.Index(i))
+	}
+}
+
+// pushEntries queues the keys and the values of a map, each only if its type
+// can lead to a component.
+func (w *parentWalk) pushEntries(val reflect.Value) {
+	t := val.Type()
+	walkKeys, walkElems := w.lc.traversable(t.Key()), w.lc.traversable(t.Elem())
+	iter := val.MapRange()
+	for iter.Next() {
+		if walkKeys {
+			w.queue.Push(iter.Key())
+		}
+		if walkElems {
+			w.queue.Push(iter.Value())
+		}
+	}
 }
 
 // ignoredField reports whether a struct field is excluded from dependency
